@@ -197,8 +197,8 @@ class MAINApp(QQuickView):
         #Clean up the model
         self.nModel = 0
         if (self.volume): 
-            self.volume = None
             self.ren.RemoveVolume(self.volume)
+            self.volume = None
         if (self.mandible):
             self.mandible = None
             self.ren.RemoveActor(self.mandibleActor)
