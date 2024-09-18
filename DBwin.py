@@ -166,6 +166,18 @@ class MAINApp(QQuickView):
         self.widget.Initialize()
         self.widget.Start()
 
+        # models 
+        self.nModel = 0
+        self.volume = None
+        self.mandible = None
+        self.maxilla = None
+        self.upper = None
+        self.lower = None
+        self.lSinus = None
+        self.rSinus = None
+        self.lNerve = None
+        self.rNerve = None
+
         # Connect TableView.selectedRow to fill_study
         self.my_TableModel.selected.connect(self.set_buttons_status)
         self.my_TableModel.clickedButton.connect(self.add_model)
@@ -182,6 +194,36 @@ class MAINApp(QQuickView):
         res = list(results)
         self.currentRow = res[0]
 
+        #Clean up the model
+        self.nModel = 0
+        if (self.volume): 
+            self.volume = None
+            self.ren.RemoveVolume(self.volume)
+        if (self.mandible):
+            self.mandible = None
+            self.ren.RemoveActor(self.mandibleActor)
+        if (self.maxilla):
+            self.maxilla = None
+            self.ren.RemoveActor(self.maxillaActor)
+        if (self.upper):
+            self.upper = None
+            self.ren.RemoveActor(self.upperActor)
+        if (self.lower):
+            self.lower = None
+            self.ren.RemoveActor(self.lowerActor)
+        if (self.lSinus): 
+            self.lSinus = None
+            self.ren.RemoveActor(self.lSinusActor)
+        if (self.rSinus): 
+            self.rSinus = None
+            self.ren.RemoveActor(self.rSinusActor)
+        if (self.lNerve): 
+            self.lNerve = None
+            self.ren.RemoveActor(self.lNerveActor)
+        if (self.rNerve):
+            self.rNerve = None
+            self.ren.RemoveActor(self.rNerveActor)
+   
         # Make 
         print(res[0]['patient_name'], res[0]['study_date'])
         self.buttonStatus = [0] * 41
@@ -238,9 +280,10 @@ class MAINApp(QQuickView):
         if (name == 'CT'):
             if (self.buttonStatus[0]==1):
                 # load_ct_data
-                self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 2)
+                if (self.volume==None): self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 2)
                 self.ren.AddVolume(self.volume)
                 self.buttonStatus[0]=2
+                self.nModel+=1
             elif (self.buttonStatus[0]==2):
                 # hide volume and 
                 self.ren.RemoveVolume(self.volume)
@@ -249,13 +292,16 @@ class MAINApp(QQuickView):
             # Handle Mandible button click
             if (self.buttonStatus[1]==1):
                 # load mandible.stl
-                reader = vtk.vtkSTLReader()
-                reader.SetFileName(self.currentRow['mandible_path'])
-                reader.MergingOn()
-                reader.Update()
-                print("Open "+self.currentRow['mandible_path'])
+                if (self.mandible==None):
+                    self.nModel+=1
+                    reader = vtk.vtkSTLReader()
+                    reader.SetFileName(self.currentRow['mandible_path'])
+                    reader.MergingOn()
+                    reader.Update()
+                    self.mandible = reader.GetOutput()
+                    print("Open "+self.currentRow['mandible_path'])                    
                 self.mandibleMapper = vtkPolyDataMapper()
-                self.mandibleMapper.SetInputConnection(reader.GetOutputPort())
+                self.mandibleMapper.SetInputDataObject(self.mandible)
                 self.mandibleActor = vtkActor()
                 self.mandibleActor.GetProperty().SetOpacity(0.3)
                 self.mandibleActor.SetMapper(self.mandibleMapper)
@@ -267,14 +313,17 @@ class MAINApp(QQuickView):
                 self.buttonStatus[1]=1
         elif (name == "Maxiilary"):    
             if self.buttonStatus[2] == 1:
-                # load maxilla.stl
-                reader = vtk.vtkSTLReader()
-                reader.SetFileName(self.currentRow['maxilla_path'])
-                reader.MergingOn()
-                reader.Update()
-                print("Open " + self.currentRow['maxilla_path'])
+                if (self.maxilla==None):
+                    self.nModel+=1
+                    # load maxilla.stl
+                    reader = vtk.vtkSTLReader()
+                    reader.SetFileName(self.currentRow['maxilla_path'])
+                    reader.MergingOn()
+                    reader.Update()
+                    self.maxilla = reader.GetOutput()
+                    print("Open " + self.currentRow['maxilla_path'])
                 self.maxillaMapper = vtkPolyDataMapper()
-                self.maxillaMapper.SetInputConnection(reader.GetOutputPort())
+                self.maxillaMapper.SetInputDataObject(self.maxilla)
                 self.maxillaActor = vtkActor()
                 self.maxillaActor.SetMapper(self.maxillaMapper)
                 self.maxillaActor.GetProperty().SetOpacity(0.3)
@@ -286,14 +335,17 @@ class MAINApp(QQuickView):
                 self.buttonStatus[2] = 1 
         elif (name == "Upper"):
             if self.buttonStatus[3] == 1:
-                # load upper.stl
-                reader = vtk.vtkSTLReader()
-                reader.SetFileName(self.currentRow['upper_path'])
-                reader.MergingOn()
-                reader.Update()
-                print("Open " + self.currentRow['upper_path'])
+                if (self.upper == None):
+                    self.nModel+=1
+                    # load upper.stl
+                    reader = vtk.vtkSTLReader()
+                    reader.SetFileName(self.currentRow['upper_path'])
+                    reader.MergingOn()
+                    reader.Update()
+                    self.upper = reader.GetOutput()
+                    print("Open " + self.currentRow['upper_path'])
                 self.upperMapper = vtkPolyDataMapper()
-                self.upperMapper.SetInputConnection(reader.GetOutputPort())
+                self.upperMapper.SetInputDataObject(self.upper)
                 self.upperActor = vtkActor()
                 self.upperActor.SetMapper(self.upperMapper)
                 self.upperActor.GetProperty().SetOpacity(0.3)
@@ -305,13 +357,16 @@ class MAINApp(QQuickView):
                 self.buttonStatus[3] = 1                
         elif (name == "Left Sinus"):    
                 if self.buttonStatus[4] == 1:
-                    reader = vtk.vtkSTLReader()
-                    reader.SetFileName(self.currentRow['left_sinus_path'])
-                    reader.MergingOn()
-                    reader.Update()
-                    print("Open " + self.currentRow['left_sinus_path'])
+                    if (self.lSinus==None):
+                        self.nModel+=1
+                        reader = vtk.vtkSTLReader()
+                        reader.SetFileName(self.currentRow['left_sinus_path'])
+                        reader.MergingOn()
+                        reader.Update()
+                        self.lSinus = reader.GetOutput()
+                        print("Open " + self.currentRow['left_sinus_path'])
                     self.lSinusMapper = vtkPolyDataMapper()
-                    self.lSinusMapper.SetInputConnection(reader.GetOutputPort())
+                    self.lSinusMapper.SetInputDataObject(self.lSinus)
                     self.lSinusActor = vtkActor()
                     self.lSinusActor.SetMapper(self.lSinusMapper)
                     self.ren.AddActor(self.lSinusActor)
@@ -321,13 +376,16 @@ class MAINApp(QQuickView):
                     self.buttonStatus[4] = 1
         elif (name == "Right Sinus"):    
                 if self.buttonStatus[5] == 1:
-                    reader = vtk.vtkSTLReader()
-                    reader.SetFileName(self.currentRow['right_sinus_path'])
-                    reader.MergingOn()
-                    reader.Update()
-                    print("Open " + self.currentRow['right_sinus_path'])
+                    if (self.rSinus==None):
+                        self.nModel+=1
+                        reader = vtk.vtkSTLReader()
+                        reader.SetFileName(self.currentRow['right_sinus_path'])
+                        reader.MergingOn()
+                        reader.Update()
+                        self.rSinus = reader.GetOutput()
+                        print("Open " + self.currentRow['right_sinus_path'])
                     self.rSinusMapper = vtkPolyDataMapper()
-                    self.rSinusMapper.SetInputConnection(reader.GetOutputPort())
+                    self.rSinusMapper.SetInputDataObject(self.rSinus)
                     self.rSinusActor = vtkActor()
                     self.rSinusActor.SetMapper(self.rSinusMapper)
                     self.ren.AddActor(self.rSinusActor)
@@ -337,13 +395,16 @@ class MAINApp(QQuickView):
                     self.buttonStatus[5] = 1 
         elif (name == "Lower"):    
                 if self.buttonStatus[6] == 1:
-                    reader = vtk.vtkSTLReader()
-                    reader.SetFileName(self.currentRow['lower_path'])
-                    reader.MergingOn()
-                    reader.Update()
-                    print("Open " + self.currentRow['lower_path'])
+                    if (self.lower == None):
+                        self.nModel+=1
+                        reader = vtk.vtkSTLReader()
+                        reader.SetFileName(self.currentRow['lower_path'])
+                        reader.MergingOn()
+                        reader.Update()
+                        self.lower = reader.GetOutput()
+                        print("Open " + self.currentRow['lower_path'])
                     self.lowerMapper = vtkPolyDataMapper()
-                    self.lowerMapper.SetInputConnection(reader.GetOutputPort())
+                    self.lowerMapper.SetInputDataObject(self.lower)
                     self.lowerActor = vtkActor()
                     self.lowerActor.SetMapper(self.lowerMapper)
                     self.lowerActor.GetProperty().SetOpacity(0.3)
@@ -354,13 +415,16 @@ class MAINApp(QQuickView):
                     self.buttonStatus[6] = 1
         elif (name == "Left Nerve"):    
                 if self.buttonStatus[7] == 1:
-                    reader = vtk.vtkSTLReader()
-                    reader.SetFileName(self.currentRow['left_nerve_path'])
-                    reader.MergingOn()
-                    reader.Update()
-                    print("Open " + self.currentRow['left_nerve_path'])
+                    if (self.lNerve == None):
+                        self.nModel+=1
+                        reader = vtk.vtkSTLReader()
+                        reader.SetFileName(self.currentRow['left_nerve_path'])
+                        reader.MergingOn()
+                        reader.Update()
+                        self.lNerve = reader.GetOutput()
+                        print("Open " + self.currentRow['left_nerve_path'])
                     self.lNerveMapper = vtkPolyDataMapper()
-                    self.lNerveMapper.SetInputConnection(reader.GetOutputPort())
+                    self.lNerveMapper.SetInputDataObject(self.lNerve)
                     self.lNerveActor = vtkActor()
                     self.lNerveActor.SetMapper(self.lNerveMapper)
                     self.ren.AddActor(self.lNerveActor)
@@ -370,13 +434,16 @@ class MAINApp(QQuickView):
                     self.buttonStatus[7] = 1  
         elif (name == "Right Nerve"):
                 if self.buttonStatus[8] == 1:
-                    reader = vtk.vtkSTLReader()
-                    reader.SetFileName(self.currentRow['right_nerve_path'])
-                    reader.MergingOn()
-                    reader.Update()
-                    print("Open " + self.currentRow['right_nerve_path'])
+                    if (self.rNerve==None):
+                        self.nModel+=1
+                        reader = vtk.vtkSTLReader()
+                        reader.SetFileName(self.currentRow['right_nerve_path'])
+                        reader.MergingOn()
+                        reader.Update()
+                        self.rNerve = reader.GetOutput()
+                        print("Open " + self.currentRow['right_nerve_path'])
                     self.rNerveMapper = vtkPolyDataMapper()
-                    self.rNerveMapper.SetInputConnection(reader.GetOutputPort())
+                    self.rNerveMapper.SetInputDataObject(self.rNerve)
                     self.rNerveActor = vtkActor()
                     self.rNerveActor.SetMapper(self.rNerveMapper)
                     self.ren.AddActor(self.rNerveActor)
@@ -389,21 +456,23 @@ class MAINApp(QQuickView):
 
         #DICOM is LPS (to L to P to Superior)
         # from Anterior to Posterior Viewpoint
+        if (self.nModel == 1):
+            # 1st entering  
+            fp = numpy.array(self.ren.GetActiveCamera().GetFocalPoint())
+            p = numpy.array(self.ren.GetActiveCamera().GetPosition())
+            dist = numpy.linalg.norm(p-fp)
 
-        fp = numpy.array(self.ren.GetActiveCamera().GetFocalPoint())
-        p = numpy.array(self.ren.GetActiveCamera().GetPosition())
-        dist = numpy.linalg.norm(p-fp)
-
-        # from Anterior 
-        self.ren.GetActiveCamera().SetPosition(fp[0], fp[1] - dist, fp[2])
-        self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
-        # from Left
-        #renderer.GetActiveCamera().SetPosition(fp[0]+dist, fp[1], fp[2])
-        #enderer.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
-        # from Head
-        #renderer.GetActiveCamera().SetPosition(fp[0], fp[1], fp[2]+dist)
-        #renderer.GetActiveCamera().SetViewUp(0.0, 1.0, 0.0);
+            # from Anterior 
+            self.ren.GetActiveCamera().SetPosition(fp[0], fp[1] - dist, fp[2])
+            self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
+            # from Left
+            #renderer.GetActiveCamera().SetPosition(fp[0]+dist, fp[1], fp[2])
+            #enderer.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
+            # from Head
+            #renderer.GetActiveCamera().SetPosition(fp[0], fp[1], fp[2]+dist)
+            #renderer.GetActiveCamera().SetViewUp(0.0, 1.0, 0.0);
     
-        self.ren.ResetCameraClippingRange()
-        self.ren.ResetCamera()
+            self.ren.ResetCameraClippingRange()
+            self.ren.ResetCamera()
+
         self.widget.update()

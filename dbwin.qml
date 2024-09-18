@@ -45,6 +45,9 @@ Item {
                 model: tableViewId.model
             }
 
+            // selectionMode: tableViewId.SingleSelection
+            // selectionBehavior: tableViewId.SelectRows
+
             delegate:  Rectangle {
                 implicitWidth: 150
                 implicitHeight: 32
@@ -64,12 +67,13 @@ Item {
                 MouseArea {
                         anchors.fill: parent
                         onClicked: {
-                            tableViewId.selectionModel.select(tableViewId.model.index(index, 0),ItemSelectionModel.Select)
+                            tableViewId.selectionModel.select(tableViewId.model.index(index, 0),ItemSelectionModel.ClearAndSelect | ItemSelectionModel.Current | ItemSelectionModel.Rows)
                             console.log(tableViewId.model.index(index,0).row)
                             tableViewId.selectedRow(tableViewId.model.index(index,0).row) 
                         }
                 }
             }
+        
             SelectionRectangle {
                 target: tableViewId
             }
@@ -266,47 +270,47 @@ Item {
         }
         
         function change_button_status(bList) {
-            if (bList[0]) ctId.changeState(bList[0])
-            if (bList[1]) mandibleId.changeState(bList[1])
-            if (bList[2]) maxillaryId.changeState(bList[2])
-            if (bList[3]) upperId.changeState(bList[3])
-            if (bList[4]) leftSinusId.changeState(bList[4])
-            if (bList[5]) rightSinusId.changeState(bList[5])
-            if (bList[6]) lowerId.changeState(bList[6])
-            if (bList[7]) leftNerveId.changeState(bList[7])
-            if (bList[8]) rightNerveId.changeState(bList[8])
-            if (bList[9]) tooth11Id.changeState(bList[9])
-            if (bList[10]) tooth12Id.changeState(bList[10])
-            if (bList[11]) tooth13Id.changeState(bList[11])
-            if (bList[12]) tooth14Id.changeState(bList[12])
-            if (bList[13]) tooth15Id.changeState(bList[13])
-            if (bList[14]) tooth16Id.changeState(bList[14])
-            if (bList[15]) tooth17Id.changeState(bList[15])
-            if (bList[16]) tooth18Id.changeState(bList[16])
-            if (bList[17]) tooth21Id.changeState(bList[17])
-            if (bList[18]) tooth22Id.changeState(bList[18])
-            if (bList[19]) tooth23Id.changeState(bList[19])
-            if (bList[20]) tooth24Id.changeState(bList[20])
-            if (bList[21]) tooth25Id.changeState(bList[21])
-            if (bList[22]) tooth26Id.changeState(bList[22])
-            if (bList[23]) tooth27Id.changeState(bList[23])
-            if (bList[24]) tooth28Id.changeState(bList[24])
-            if (bList[25]) tooth31Id.changeState(bList[25])
-            if (bList[26]) tooth32Id.changeState(bList[26])
-            if (bList[27]) tooth33Id.changeState(bList[27])
-            if (bList[28]) tooth34Id.changeState(bList[28])
-            if (bList[29]) tooth35Id.changeState(bList[29])
-            if (bList[30]) tooth36Id.changeState(bList[30])
-            if (bList[31]) tooth37Id.changeState(bList[31])
-            if (bList[32]) tooth38Id.changeState(bList[32])
-            if (bList[33]) tooth41Id.changeState(bList[33])
-            if (bList[34]) tooth42Id.changeState(bList[34])
-            if (bList[35]) tooth43Id.changeState(bList[35])
-            if (bList[36]) tooth44Id.changeState(bList[36])
-            if (bList[37]) tooth45Id.changeState(bList[37])
-            if (bList[38]) tooth46Id.changeState(bList[38])
-            if (bList[39]) tooth47Id.changeState(bList[39])
-            if (bList[40]) tooth48Id.changeState(bList[40])
+            ctId.changeState(bList[0])
+            mandibleId.changeState(bList[1])
+            maxillaryId.changeState(bList[2])
+            upperId.changeState(bList[3])
+            leftSinusId.changeState(bList[4])
+            rightSinusId.changeState(bList[5])
+            lowerId.changeState(bList[6])
+            leftNerveId.changeState(bList[7])
+            rightNerveId.changeState(bList[8])
+            tooth11Id.changeState(bList[9])
+            tooth12Id.changeState(bList[10])
+            tooth13Id.changeState(bList[11])
+            tooth14Id.changeState(bList[12])
+            tooth15Id.changeState(bList[13])
+            tooth16Id.changeState(bList[14])
+            tooth17Id.changeState(bList[15])
+            tooth18Id.changeState(bList[16])
+            tooth21Id.changeState(bList[17])
+            tooth22Id.changeState(bList[18])
+            tooth23Id.changeState(bList[19])
+            tooth24Id.changeState(bList[20])
+            tooth25Id.changeState(bList[21])
+            tooth26Id.changeState(bList[22])
+            tooth27Id.changeState(bList[23])
+            tooth28Id.changeState(bList[24])
+            tooth31Id.changeState(bList[25])
+            tooth32Id.changeState(bList[26])
+            tooth33Id.changeState(bList[27])
+            tooth34Id.changeState(bList[28])
+            tooth35Id.changeState(bList[29])
+            tooth36Id.changeState(bList[30])
+            tooth37Id.changeState(bList[31])
+            tooth38Id.changeState(bList[32])
+            tooth41Id.changeState(bList[33])
+            tooth42Id.changeState(bList[34])
+            tooth43Id.changeState(bList[35])
+            tooth44Id.changeState(bList[36])
+            tooth45Id.changeState(bList[37])
+            tooth46Id.changeState(bList[38])
+            tooth47Id.changeState(bList[39])
+            tooth48Id.changeState(bList[40])
             console.log(bList)
         }
 
