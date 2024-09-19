@@ -280,7 +280,8 @@ class MAINApp(QQuickView):
         if (name == 'CT'):
             if (self.buttonStatus[0]==1):
                 # load_ct_data
-                if (self.volume==None): self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 2)
+                if (self.volume==None): 
+                    self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 3)
                 self.ren.AddVolume(self.volume)
                 self.buttonStatus[0]=2
                 self.nModel+=1
