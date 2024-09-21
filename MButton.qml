@@ -10,9 +10,11 @@ Rectangle {
     signal buttonClicked(string text)
 
     border { color: "darkblue"; width : 3}
-    function changeState(toVal) { 
-        // console.log("enter")
-        state = toVal ? "Clickable" : "Unclickable"
+
+    function changeState(toVal) {
+        if (toVal==0) state="Unclickable"
+        else if (toVal==1) state="Clickable"
+        else state="Loaded" 
     } 
     
     Text {
