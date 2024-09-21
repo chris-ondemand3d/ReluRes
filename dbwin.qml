@@ -23,7 +23,7 @@ Item {
 
         TableView {
             id: tableViewId
-            width : 600
+            width : 750
             height : 400
             Layout.alignment: Qt.AlignCenter
 
@@ -49,7 +49,7 @@ Item {
             // selectionBehavior: tableViewId.SelectRows
 
             delegate:  Rectangle {
-                implicitWidth: 150
+                implicitWidth: 140
                 implicitHeight: 32
                 //anchors.fill: parent
                 required property bool selected
@@ -126,7 +126,7 @@ Item {
                 buttonText: "Right Nerve"
             }
         }
-    
+
         GridLayout {
             id: mTeethGridLayoutId
             Layout.alignment: Qt.AlignCenter
@@ -268,7 +268,35 @@ Item {
                 }   
             }
         }
-        
+
+
+        RowLayout {
+            id: inputLayoutId
+            Layout.alignment: Qt.AlignCenter
+            
+            Button {
+                id: captureId
+                width: 48; height: 24
+                text: "Capture"
+                onClicked: my_TableModel.captureScreen()
+            }
+
+            TextInput {
+                id: textInput1
+                width: 400; height: 24
+                focus: true
+                text: ""
+            }
+
+            Button {
+                id: saveId
+                width: 48; height: 24
+                text: "Save Comment"
+                onClicked: my_TableModel.saveComment(textInput1.text)
+            }
+        }   
+
+
         function change_button_status(bList) {
             ctId.changeState(bList[0])
             mandibleId.changeState(bList[1])
@@ -322,6 +350,7 @@ Item {
         Component.onCompleted: {
             my_TableModel.changeButtonStatus.connect(mLayoutId.change_button_status)
             mLayoutId.clickedButton.connect(my_TableModel.clickedButton)
+
             // for each 41 button
             ctId.buttonClicked.connect(mLayoutId.onBtnClicked)
             mandibleId.buttonClicked.connect(mLayoutId.onBtnClicked)

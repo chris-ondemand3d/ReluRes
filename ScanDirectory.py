@@ -365,7 +365,7 @@ def load_dicom(directory,blendType=3):
     # instanciate Scanner:
     sp = gdcm.Scanner.New();
     s = sp.__ref__()
-    w = ProgressWatcher(s, 'Watcher')
+    # w = ProgressWatcher(s, 'Watcher')
 
     s.AddTag(t1);
     s.AddTag(t2);
@@ -631,7 +631,7 @@ def load_dicom(directory,blendType=3):
             if (min_npV < 0):
                 iRescaleIntercept = 0
             else:
-                iRescaleIntercept = -1000
+                iRescaleIntercept = -1024
 
             iWindowCenter = 1024
             iWindowWidth = 4092
@@ -654,7 +654,7 @@ def load_dicom(directory,blendType=3):
             if s27: iRescaleSlope = s27
 
             if s26 or (max_npV-min_npV)>= 4096:
-                print("Weird! 16bit data and rescale intercept", s26, s27)
+                print("16bit data and rescale intercept", s26, s27)
 
         # pyplot single slice
         x = numpy.arange(0.0, (w+1)*dx, dx)
@@ -678,9 +678,13 @@ def load_dicom(directory,blendType=3):
     dataImporter = numpy2VTK(npVolume, [dx, dy, dz], origin, dirCosines)
     dataImporter.Update()
 
+    # Test for Removing some outlier, [npV_min, npV_min + 0.05*(max_npV-min_npV)]->0-rescale intercept, [npV_max-0.05*(max_npV-min_npV) ,npV_max] 값을 조정 
+    npVolume[npVolume < (min_npV + 0.005*(max_npV-min_npV))] = 0
+
     start_time = time.time()
-    npImage = npVolume*(256.0/(max_npV-min_npV))-iRescaleSlope
-    thresholds = threshold_multiotsu(npImage,4)
+    npVolume = npVolume*(256.0/(max_npV-min_npV))
+
+    thresholds = threshold_multiotsu(npVolume,4)
     end_time = time.time()
     print(end_time-start_time)
     adjThresholds = []
@@ -696,7 +700,8 @@ def load_dicom(directory,blendType=3):
     center = [x0 + xSpacing * 0.5 * (xMin + xMax),
               y0 + ySpacing * 0.5 * (yMin + yMax),
               z0 + zSpacing * 0.5 * (zMin + zMax)]
-    #print(xMin, xMax, yMin, yMax, zMin, zMax, xSpacing, ySpacing, zSpacing, center)
+    
+    print(xMin, xMax, yMin, yMax, zMin, zMax, xSpacing, ySpacing, zSpacing, x0,y0,z0, center)
     #print(iRescaleSlope, iRescaleIntercept, iWindowCenter, iWindowWidth)
 
     shiftScale = vtk.vtkImageShiftScale()
@@ -734,12 +739,11 @@ def load_dicom(directory,blendType=3):
     #property.SetGradientOpacity(gradientFun)
     property.SetInterpolationTypeToLinear()
     # Try other volume rendering options
-    opacityWindow = 2048
-    opacityLevel = 1280
+    
+    opacityWindow = 2048 #(max_npV-min_npV)/4.0
+    opacityLevel = 1024 #(max_npV-min_npV)/2.0
 
     if (blendType == 0):  # MIP
-        colorFun.AddRGBSegment(0.0, 1.0, 1.0, 1.0, 255.0, 1.0, 1.0, 1.0)
-        opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0, opacityLevel + 0.5 * opacityWindow, 1.0)
         mapper.SetBlendModeToMaximumIntensity()
     elif (blendType == 1):  # ShadeOff
         colorFun.AddRGBSegment(opacityLevel - 0.5 * opacityWindow, 0.0, 0.0, 0.0, opacityLevel + 0.5 * opacityWindow,
@@ -762,22 +766,23 @@ def load_dicom(directory,blendType=3):
         # point5, adjThresholds[2]+width/2, O=0.5
         # point6, 3072, O=0.5 """
 
-        colorFun.AddRGBPoint(-1024, 0.3, 0.3, 1.0, 0.5, 0.0)
+        colorFun.AddRGBPoint(min_npV*iRescaleSlope+iRescaleIntercept, 0.3, 0.3, 1.0, 0.5, 0.0)
         colorFun.AddRGBPoint(adjThresholds[0], 0.95, 0.95, 0.85, 0.5, 0.0)
         colorFun.AddRGBPoint((adjThresholds[0]+adjThresholds[2])/2, 0.75, 0.4, 0.35, 0.5, 0.0)
         colorFun.AddRGBPoint(adjThresholds[2], .95, .84, .19, .5, 0.0)
-        colorFun.AddRGBPoint(3071, 0.78, 0.78, 0.92, .5, 0.0)
+        colorFun.AddRGBPoint(max_npV*iRescaleSlope+iRescaleIntercept, 0.78, 0.78, 0.92, .5, 0.0)
+
         
         width_s=80
         width_l=160
-        opacityFun.AddPoint(-1024, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+        opacityFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
         # Right
         opacityFun.AddPoint(adjThresholds[0], .0, .5, .0)
         opacityFun.AddPoint(adjThresholds[0]+width_s/2.0, 0.5, .5, .0)
         opacityFun.AddPoint(adjThresholds[0]+width_s, 0.0, .5, .0)
         opacityFun.AddPoint(adjThresholds[1], 0, .5, .0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(adjThresholds[2], 0.75, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(3071, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+        opacityFun.AddPoint(adjThresholds[2], 0.5, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+        opacityFun.AddPoint(max_npV*iRescaleSlope+iRescaleIntercept, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
         
         
         gradientFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept, 1.0, 0.5,.0)
@@ -794,24 +799,34 @@ def load_dicom(directory,blendType=3):
         property.SetScalarOpacityUnitDistance(0.8919)
 
     elif (blendType == 5): # CT Bone2
-        colorFun.AddRGBPoint(-1024, 0, 0, 0, 0.5, 0.0)
-        colorFun.AddRGBPoint(-16, 0.73, 0.25, 0.30, 0.5, 0.0)
-        colorFun.AddRGBPoint(761, .90, .82, .56, .5, 0.0)
-        colorFun.AddRGBPoint(1374, .90, .82, .56, .5, 0.0)
-        colorFun.AddRGBPoint(3071, 1, 1, 1, .5, 0.0)
-        property.ShadeOff()
-        opacityFun.AddPoint(-3024, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(199, 0, .49, .61) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(1000, .08, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(1734, .42, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(3071, .45, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        mapper.SetBlendModeToComposite()
-        property.SetAmbient(0.1)
-        property.SetDiffuse(0.9)
-        property.SetSpecular(0.2)
-        property.SetSpecularPower(10.0)
-        property.SetScalarOpacityUnitDistance(0.8919)
+        colorFun.AddRGBPoint(min_npV*iRescaleSlope+iRescaleIntercept, 0.3, 0.3, 1.0, 0.5, 0.0)
+        colorFun.AddRGBPoint(adjThresholds[0], 0.95, 0.95, 0.85, 0.5, 0.0)
+        colorFun.AddRGBPoint((adjThresholds[0]+adjThresholds[2])/2, 0.75, 0.4, 0.35, 0.5, 0.0)
+        colorFun.AddRGBPoint(adjThresholds[2], .95, .84, .19, .5, 0.0)
+        colorFun.AddRGBPoint(max_npV*iRescaleSlope+iRescaleIntercept, 0.78, 0.78, 0.92, .5, 0.0)
 
+        
+        width_s=80
+        width_l=160
+        opacityFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+        # Right
+        opacityFun.AddPoint(adjThresholds[1], 0, .5, .0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+        opacityFun.AddPoint(adjThresholds[2], 0.5, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+        opacityFun.AddPoint(max_npV*iRescaleSlope+iRescaleIntercept, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+        
+        
+        gradientFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept, 1.0, 0.5,.0)
+        gradientFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept + (max_npV-min_npV)*0.2,.0,0.5,.0)
+        #gradientFun.AddPoint(28.,.0,0.0,.0)
+        gradientFun.AddPoint(max_npV*iRescaleSlope+iRescaleIntercept,1.0,0.5,.0)
+
+        property.ShadeOn()
+        mapper.SetBlendModeToComposite()
+        property.SetAmbient(0.2)
+        property.SetDiffuse(1.0)
+        property.SetSpecular(0.0)
+        property.SetSpecularPower(1.0)
+        property.SetScalarOpacityUnitDistance(0.8919)
     volume.SetMapper(mapper)
     volume.SetProperty(property)
 

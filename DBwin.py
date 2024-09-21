@@ -32,8 +32,10 @@ class TableModel(QAbstractTableModel):
     selected = Signal(int)
     changeButtonStatus = Signal(list)
     clickedButton = Signal(str)
+    captureScreen = Signal()
+    saveComment = Signal(str)
 
-    COLUMN_NAMES = ["patient_ID", "patient_Name", "studyUID", "studyDate"]
+    COLUMN_NAMES = ["patient_ID", "patient_Name", "studyUID", "studyDate", "Comment"]
 
     def __init__(self):
         QAbstractTableModel.__init__(self)
@@ -49,7 +51,7 @@ class TableModel(QAbstractTableModel):
     def fill_row(self, studies):
         for x in studies:
             self.rows.append(list(x.values())[1:])
-            #print(list(x.values()))
+            #print(list(x.values())[1:])
 
     def data(self, index, role=Qt.DisplayRole):
         """ Depending on the index and role given, return data. If not 
@@ -69,7 +71,7 @@ class TableModel(QAbstractTableModel):
             patient_name = self.rows[index.row()][1]
             study_uid = self.rows[index.row()][2]
             study_date = self.rows[index.row()][3]
-
+            comment = self.rows[index.row()][4]
             if index.column() == 0:
                 return patient_id
             elif index.column() == 1:
@@ -78,6 +80,9 @@ class TableModel(QAbstractTableModel):
                 return study_uid
             elif index.column() == 3:
                 return study_date
+            elif index.column() == 4:
+                return comment
+            
         
         return None
 
@@ -96,6 +101,8 @@ class TableModel(QAbstractTableModel):
                 return "Study UID"
             elif section == 3:
                 return "Study Date"
+            elif section == 4:
+                return "Comment"
         
         return None
 
@@ -123,12 +130,14 @@ class MAINApp(QQuickView):
         self.db = client['KorGuide']
         self.collection = self.db['ReluRes']
 
+        self.screenshotCount = 0
+
         # Saturate TableModel   
-        results = self.collection.find({}, {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "_id": 1 })
+        results = self.collection.find({}, {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "comment": 1, "_id": 1 })
         self.allres = list(results)
+        #print(self.allres)
         self.my_TableModel = TableModel()
         self.my_TableModel.fill_row(self.allres)
-        # print(self.my_TableModel.nrow())
 
         self.rootContext().setContextProperty("my_TableModel",self.my_TableModel)
         _win_source = QUrl.fromLocalFile(os.path.join(os.path.dirname(__file__), 'dbwin.qml'))
@@ -136,17 +145,11 @@ class MAINApp(QQuickView):
 
         self.setResizeMode(QQuickView.SizeRootObjectToView)
         self.setTitle("Relu Result Viewer")
-        self.resize(640, 960) # The other Render Window (960x960)
+        self.resize(640, 960)
         self.setPosition(40,40)
         #self.setProperty("x",40)
         #self.setProperty("y",40)
-        """
-        self.window = QMainWindow()
 
-        # create the widget
-        widget = QVTKRenderWindowInteractor(window)
-        self.window.setCentralWidget(widget)
-        """
         self.window = QMainWindow()
         self.window.resize(960,960)
         self.widget = QVTKRenderWindowInteractor(self.window)
@@ -157,7 +160,7 @@ class MAINApp(QQuickView):
         self.ren.UseDepthPeelingForVolumesOn()
 
         # show the widget
-        self.window.move(680,40)
+        self.window.move(680,10)
         self.window.show()
 
         self.istyle = vtk.vtkInteractorStyleTrackballCamera()
@@ -181,6 +184,8 @@ class MAINApp(QQuickView):
         # Connect TableView.selectedRow to fill_study
         self.my_TableModel.selected.connect(self.set_buttons_status)
         self.my_TableModel.clickedButton.connect(self.add_model)
+        self.my_TableModel.captureScreen.connect(self.captureScreen)
+        self.my_TableModel.saveComment.connect(self.saveComment)
 
     @Slot(int) #TableView selectedRow(int) signal handler
     def set_buttons_status(self, row=0):
@@ -193,6 +198,7 @@ class MAINApp(QQuickView):
         results = self.collection.find( filter=filter )
         res = list(results)
         self.currentRow = res[0]
+        #print(self.currentRow['_id'])
 
         #Clean up the model
         self.nModel = 0
@@ -281,7 +287,7 @@ class MAINApp(QQuickView):
             if (self.buttonStatus[0]==1):
                 # load_ct_data
                 if (self.volume==None): 
-                    self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 3)
+                    self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 5)
                 self.ren.AddVolume(self.volume)
                 self.buttonStatus[0]=2
                 self.nModel+=1
@@ -456,24 +462,64 @@ class MAINApp(QQuickView):
         self.my_TableModel.changeButtonStatus.emit(self.buttonStatus)        
 
         #DICOM is LPS (to L to P to Superior)
-        # from Anterior to Posterior Viewpoint
+        # from Anterior to Posterior Viewpoint, DICOM is LPS
         if (self.nModel == 1):
-            # 1st entering  
+            # 1st entering, setup camera   
             fp = numpy.array(self.ren.GetActiveCamera().GetFocalPoint())
             p = numpy.array(self.ren.GetActiveCamera().GetPosition())
-            dist = numpy.linalg.norm(p-fp)
-
+            dist = self.ren.GetActiveCamera().GetDistance()
+            print(fp,p,dist)
             # from Anterior 
             self.ren.GetActiveCamera().SetPosition(fp[0], fp[1] - dist, fp[2])
             self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
             # from Left
-            #renderer.GetActiveCamera().SetPosition(fp[0]+dist, fp[1], fp[2])
-            #enderer.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
+            #self.ren.GetActiveCamera().SetPosition(fp[0]+dist, fp[1], fp[2])
+            #self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
             # from Head
-            #renderer.GetActiveCamera().SetPosition(fp[0], fp[1], fp[2]+dist)
-            #renderer.GetActiveCamera().SetViewUp(0.0, 1.0, 0.0);
-    
+            #self.ren.GetActiveCamera().SetPosition(fp[0], fp[1], fp[2]+dist)
+            #self.ren.GetActiveCamera().SetViewUp(0.0, 1.0, 0.0);
+            self.ren.GetActiveCamera().ParallelProjectionOn()
+            self.ren.GetActiveCamera().GetViewTransformMatrix()
+            #print(self.ren.GetActiveCamera().GetViewTransformMatrix())
             self.ren.ResetCameraClippingRange()
             self.ren.ResetCamera()
 
+            # world coordinate bounding box () - (x1,y1,z1,x2,y2,z2)->(x1,y2,z1),(x2,y1,z1),(x2,y2,z1), (x1,y1,z2), (x1,y2,z2), (x2,y1,z2)
+            #print(self.window.)
+            print("Renderwindow size:",self.widget.GetRenderWindow().GetSize())
+            xy = self.volume.GetBounds()
+            print(xy)
+            coordinate = vtk.vtkCoordinate()
+            coordinate.SetCoordinateSystemToWorld()
+            coordinate.SetValue(xy[0],xy[2],xy[4])
+            #coordinate.SetValue(xy[1],xy[3],xy[5])
+            #coordinate.SetValue(-55.313, -52.437, -33.75)
+            viewCoord = coordinate.GetComputedViewportValue(self.ren)
+            dispCoord = coordinate.GetComputedDisplayValue(self.ren)
+            print(viewCoord, dispCoord) 
+
+
+
         self.widget.update()
+
+    @Slot()
+    def captureScreen(self):
+        print("Capture")
+        winToImageFilter = vtk.vtkWindowToImageFilter()
+        winToImageFilter.SetInput(self.widget.GetRenderWindow())
+        winToImageFilter.Update()
+        scrFileName = "scr_%d.png" % self.screenshotCount
+        print("Save to ",scrFileName)
+        self.screenshotCount += 1
+        writer = vtk.vtkPNGWriter()
+        writer.SetFileName(scrFileName)
+        writer.SetInputData(winToImageFilter.GetOutput())
+        writer.Write()
+
+    @Slot(str)
+    def saveComment(self, commentText):
+        print("saveComment")
+        if len(commentText) != 0:
+            # self.currentRow = objid in mongodb
+            # update comment 
+            self.collection.update_one( { "_id": ObjectId(self.currentRow['_id'])}, [ { "$set" : { "comment": commentText } }] )
