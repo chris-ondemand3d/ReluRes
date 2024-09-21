@@ -727,6 +727,8 @@ def load_dicom(directory,blendType=3):
 
     volume.SetUserMatrix(mat)
 
+    # max_npV, min_npV, adjThresholds
+
     # Transfer Function
     colorFun = vtk.vtkColorTransferFunction()
     opacityFun = vtk.vtkPiecewiseFunction()
