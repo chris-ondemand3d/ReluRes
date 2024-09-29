@@ -273,7 +273,19 @@ Item {
         RowLayout {
             id: inputLayoutId
             Layout.alignment: Qt.AlignCenter
-            
+
+            Button {
+                id: segmentId
+                width: 48; height: 24
+                text: "Segment"
+                onClicked: my_TableModel.segment()
+            }
+            Button {
+                id: renderModeId
+                width: 48; height: 24
+                text: "Rendering Mode"
+                onClicked: my_TableModel.rendermode()
+            }
             Button {
                 id: captureId
                 width: 48; height: 24
@@ -283,7 +295,7 @@ Item {
 
             TextInput {
                 id: textInput1
-                width: 400; height: 24
+                width: 200; height: 24
                 focus: true
                 text: ""
             }

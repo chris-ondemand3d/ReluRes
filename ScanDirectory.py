@@ -13,7 +13,7 @@
 #
 ###########################################################################################
 
-import sys
+import sys, os
 import time
 
 import gdcm
@@ -26,6 +26,8 @@ from scipy import ndimage
 from scipy.signal import argrelextrema
 from skimage import data
 from skimage.filters import threshold_multiotsu
+
+import dicom2nifti.convert_dir as convert_directory
 
 class ProgressWatcher(gdcm.SimpleSubjectWatcher):
     def ShowProgress(self, sender, event):
@@ -317,7 +319,7 @@ def show_slices(slices):
    plt.show()
 
 
-def load_dicom(directory,blendType=3):
+def load_dicom(directory,blendType=3,makenifti=False):
 
     # Define the set of tags we are interested in, may need more
     t1 = gdcm.Tag(0x10, 0x20);  # Patient ID
@@ -561,6 +563,7 @@ def load_dicom(directory,blendType=3):
                     return None
 
         else:  # multiple files in a series
+
             # Read Postion and sorting
             series_files = []
             for i in range(len(series_imgfiles)):
@@ -681,6 +684,14 @@ def load_dicom(directory,blendType=3):
     # Test for Removing some outlier, [npV_min, npV_min + 0.05*(max_npV-min_npV)]->0-rescale intercept, [npV_max-0.05*(max_npV-min_npV) ,npV_max] 값을 조정 
     npVolume[npVolume < (min_npV + 0.005*(max_npV-min_npV))] = 0
 
+    # makenifti files with directory, output_directory
+    if makenifti:
+        parent_dir = os.path.dirname(os.path.abspath(directory))
+        output_directory = os.path.join(parent_dir,"segment")
+        os.makedirs(output_directory, exist_ok=True)
+        print(output_directory)
+        convert_directory.convert_directory(directory, output_directory)
+
     start_time = time.time()
     npVolume = npVolume*(256.0/(max_npV-min_npV))
 
@@ -717,6 +728,7 @@ def load_dicom(directory,blendType=3):
     mapper = vtk.vtkOpenGLGPUVolumeRayCastMapper()
     mapper.SetInputConnection(shiftScale.GetOutputPort())
     
+    """
     mat = vtk.vtkMatrix4x4()
     for i in range(3):
         mat.SetElement(i,0,direction_x[i])
@@ -726,7 +738,7 @@ def load_dicom(directory,blendType=3):
         i=i+1
 
     volume.SetUserMatrix(mat)
-
+    """
     # max_npV, min_npV, adjThresholds
 
     # Transfer Function
@@ -746,6 +758,8 @@ def load_dicom(directory,blendType=3):
     opacityLevel = 1024 #(max_npV-min_npV)/2.0
 
     if (blendType == 0):  # MIP
+        colorFun.AddRGBSegment(0.0, 1.0, 1.0, 1.0, 255.0, 1.0, 1.0, 1.0)
+        opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0, opacityLevel + 0.5 * opacityWindow, 1.0)
         mapper.SetBlendModeToMaximumIntensity()
     elif (blendType == 1):  # ShadeOff
         colorFun.AddRGBSegment(opacityLevel - 0.5 * opacityWindow, 0.0, 0.0, 0.0, opacityLevel + 0.5 * opacityWindow,
@@ -809,7 +823,6 @@ def load_dicom(directory,blendType=3):
 
         
         width_s=80
-        width_l=160
         opacityFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
         # Right
         opacityFun.AddPoint(adjThresholds[1], 0, .5, .0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
@@ -832,4 +845,4 @@ def load_dicom(directory,blendType=3):
     volume.SetMapper(mapper)
     volume.SetProperty(property)
 
-    return volume
+    return min_npV*iRescaleSlope+iRescaleIntercept,max_npV*iRescaleSlope+iRescaleIntercept, adjThresholds, volume

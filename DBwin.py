@@ -1,6 +1,7 @@
 import sys
 import numpy
 from pathlib import Path
+import subprocess, time
 
 import pymongo
 import os, glob, json
@@ -32,6 +33,8 @@ class TableModel(QAbstractTableModel):
     selected = Signal(int)
     changeButtonStatus = Signal(list)
     clickedButton = Signal(str)
+    segment = Signal()
+    rendermode = Signal()
     captureScreen = Signal()
     saveComment = Signal(str)
 
@@ -131,6 +134,8 @@ class MAINApp(QQuickView):
         self.collection = self.db['ReluRes']
 
         self.screenshotCount = 0
+        self.rendermode = 3
+        self.makeNifti = True
 
         # Saturate TableModel   
         results = self.collection.find({}, {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "comment": 1, "_id": 1 })
@@ -184,6 +189,8 @@ class MAINApp(QQuickView):
         # Connect TableView.selectedRow to fill_study
         self.my_TableModel.selected.connect(self.set_buttons_status)
         self.my_TableModel.clickedButton.connect(self.add_model)
+        self.my_TableModel.segment.connect(self.segment)
+        self.my_TableModel.rendermode.connect(self.renderMode)
         self.my_TableModel.captureScreen.connect(self.captureScreen)
         self.my_TableModel.saveComment.connect(self.saveComment)
 
@@ -287,7 +294,11 @@ class MAINApp(QQuickView):
             if (self.buttonStatus[0]==1):
                 # load_ct_data
                 if (self.volume==None): 
-                    self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 5)
+                    if self.makeNifti:
+                        outdir = os.path.join(self.currentRow['path'],'segment')
+                        if not os.path.exists(outdir):
+                            os.makedirs(outdir)
+                self.min_npV, self.max_npV, self.adjThresholds, self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 3, self.makeNifti)
                 self.ren.AddVolume(self.volume)
                 self.buttonStatus[0]=2
                 self.nModel+=1
@@ -498,8 +509,120 @@ class MAINApp(QQuickView):
             dispCoord = coordinate.GetComputedDisplayValue(self.ren)
             print(viewCoord, dispCoord) 
 
+        self.widget.update()
+
+    @Slot()
+    def segment(self):
+        print("segment")
+
+        # Define your directories
+        input_dir = os.path.join(self.currentRow['path'],'segment')
+        output_dir = os.path.join(self.currentRow['path'],'output')
+        os.makedirs(output_dir, exist_ok=True)
+        if os.path.exists(output_dir) and os.path.exists(input_dir):
+            start_time = time.time()
+
+            os.environ['nnUNet_raw'] = '.'
+            os.environ['nnUNet_results'] = '.'
+            os.environ['nnUNet_preprocessed'] = '.'
+
+            # Command to run the nnUNetv2_predict script
+            nnunet_command = (
+                f"nnUNetv2_predict -i {input_dir}/ -o {output_dir}/ "
+                "-d Dataset111_453CT -tr nnUNetTrainer -p nnUNetPlans "
+                "-c 3d_fullres -f 0 -npp 1 -nps 1 -step_size 0.5 -device cuda --disable_tta"
+            )
+            # Execute the command
+            subprocess.run(nnunet_command, shell=True) #, executable="/bin/bash"
+            end_time = time.time()
+            print("segmentation time:", end_time-start_time)
+        else:
+            print("Error, directories not exist")
 
 
+    @Slot()
+    def renderMode(self):
+        print("Rendering Mode")
+        opacityWindow = 2048 #(max_npV-min_npV)/4.0
+        opacityLevel = 1024 #(max_npV-min_npV)/2.0
+
+        mapper = self.volume.GetMapper()
+        property = self.volume.GetProperty()
+        colorFun = vtk.vtkColorTransferFunction()
+        opacityFun = vtk.vtkPiecewiseFunction()
+        gradientFun = vtk.vtkPiecewiseFunction()
+
+        if self.rendermode == 3: # Rendering 5 and change mode
+            colorFun.AddRGBPoint(self.min_npV, 0.3, 0.3, 1.0, 0.5, 0.0)
+            colorFun.AddRGBPoint(self.adjThresholds[0], 0.95, 0.95, 0.85, 0.5, 0.0)
+            colorFun.AddRGBPoint((self.adjThresholds[0]+self.adjThresholds[2])/2, 0.75, 0.4, 0.35, 0.5, 0.0)
+            colorFun.AddRGBPoint(self.adjThresholds[2], .95, .84, .19, .5, 0.0)
+            colorFun.AddRGBPoint(self.max_npV, 0.78, 0.78, 0.92, .5, 0.0)
+      
+            width_s=80
+            opacityFun.AddPoint(self.min_npV, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+            # Right
+            opacityFun.AddPoint(self.adjThresholds[1], 0, .5, .0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+            opacityFun.AddPoint(self.adjThresholds[2], 0.5, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+            opacityFun.AddPoint(self.max_npV, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+            
+            
+            gradientFun.AddPoint(self.min_npV, 1.0, 0.5,.0)
+            gradientFun.AddPoint(self.min_npV + (self.max_npV-self.min_npV)*0.2,.0,0.5,.0)
+            #gradientFun.AddPoint(28.,.0,0.0,.0)
+            gradientFun.AddPoint(self.max_npV,1.0,0.5,.0)
+
+            property.ShadeOn()
+            mapper.SetBlendModeToComposite()
+            property.SetAmbient(0.2)
+            property.SetDiffuse(1.0)
+            property.SetSpecular(0.0)
+            property.SetSpecularPower(1.0)
+            property.SetScalarOpacityUnitDistance(0.8919)    
+            self.rendermode = 5
+
+        elif self.rendermode == 5: # Rendering 1 and change mode
+            colorFun.AddRGBSegment(0.0, 1.0, 1.0, 1.0, 255.0, 1.0, 1.0, 1.0)
+            opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0, opacityLevel + 0.5 * opacityWindow, 1.0)
+            mapper.SetBlendModeToMaximumIntensity()            
+            self.rendermode = 1
+
+        elif self.rendermode == 1: # Rendering 3 and change mode
+            width_s=80
+            width_l=160
+
+            colorFun.AddRGBPoint(self.min_npV, 0.3, 0.3, 1.0, 0.5, 0.0)
+            colorFun.AddRGBPoint(self.adjThresholds[0], 0.95, 0.95, 0.85, 0.5, 0.0)
+            colorFun.AddRGBPoint((self.adjThresholds[0]+self.adjThresholds[2])/2, 0.75, 0.4, 0.35, 0.5, 0.0)
+            colorFun.AddRGBPoint(self.adjThresholds[2], .95, .84, .19, .5, 0.0)
+            colorFun.AddRGBPoint(self.max_npV, 0.78, 0.78, 0.92, .5, 0.0)
+        
+            opacityFun.AddPoint(self.min_npV, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+            # Right
+            opacityFun.AddPoint(self.adjThresholds[0], .0, .5, .0)
+            opacityFun.AddPoint(self.adjThresholds[0]+width_s/2.0, 0.5, .5, .0)
+            opacityFun.AddPoint(self.adjThresholds[0]+width_s, 0.0, .5, .0)
+            opacityFun.AddPoint(self.adjThresholds[1], 0, .5, .0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+            opacityFun.AddPoint(self.adjThresholds[2], 0.5, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+            opacityFun.AddPoint(self.max_npV, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
+            
+            gradientFun.AddPoint(self.min_npV, 1.0, 0.5,.0)
+            gradientFun.AddPoint(self.min_npV + (self.max_npV-self.min_npV)*0.2,.0,0.5,.0)
+            #gradientFun.AddPoint(28.,.0,0.0,.0)
+            gradientFun.AddPoint(self.max_npV,1.0,0.5,.0)
+
+            property.ShadeOn()
+            mapper.SetBlendModeToComposite()
+            property.SetAmbient(0.2)
+            property.SetDiffuse(1.0)
+            property.SetSpecular(0.0)
+            property.SetSpecularPower(1.0)
+            property.SetScalarOpacityUnitDistance(0.8919)             
+            self.rendermode = 3
+        
+        property.SetColor(colorFun)
+        property.SetScalarOpacity(opacityFun)
+        #property.SetGradientOpacity(gradientFun)
         self.widget.update()
 
     @Slot()
@@ -508,7 +631,7 @@ class MAINApp(QQuickView):
         winToImageFilter = vtk.vtkWindowToImageFilter()
         winToImageFilter.SetInput(self.widget.GetRenderWindow())
         winToImageFilter.Update()
-        scrFileName = "scr_%d.png" % self.screenshotCount
+        scrFileName = "scr_%d%d.png" % (self.rendermode, self.screenshotCount)
         print("Save to ",scrFileName)
         self.screenshotCount += 1
         writer = vtk.vtkPNGWriter()

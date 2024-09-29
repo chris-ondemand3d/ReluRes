@@ -79,6 +79,7 @@ def convert_directory(dicom_directory, output_folder, compression=True, reorient
                 base_filename = _remove_accents(dicom_input[0].SeriesInstanceUID)
             logger.info('--------------------------------------------')
             logger.info('Start converting %s' % base_filename)
+            base_filename = "Dental_0001_0000"
             if compression:
                 nifti_file = os.path.join(output_folder, base_filename + '.nii.gz')
             else:
