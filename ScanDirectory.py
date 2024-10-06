@@ -28,6 +28,7 @@ from skimage import data
 from skimage.filters import threshold_multiotsu
 
 import dicom2nifti.convert_dir as convert_directory
+import nibabel as nib
 
 class ProgressWatcher(gdcm.SimpleSubjectWatcher):
     def ShowProgress(self, sender, event):
@@ -684,13 +685,42 @@ def load_dicom(directory,blendType=3,makenifti=False):
     # Test for Removing some outlier, [npV_min, npV_min + 0.05*(max_npV-min_npV)]->0-rescale intercept, [npV_max-0.05*(max_npV-min_npV) ,npV_max] 값을 조정 
     npVolume[npVolume < (min_npV + 0.005*(max_npV-min_npV))] = 0
 
+
     # makenifti files with directory, output_directory
     if makenifti:
-        parent_dir = os.path.dirname(os.path.abspath(directory))
+        """        parent_dir = os.path.dirname(os.path.abspath(directory))
         output_directory = os.path.join(parent_dir,"segment")
         os.makedirs(output_directory, exist_ok=True)
         print(output_directory)
         convert_directory.convert_directory(directory, output_directory)
+    else: """
+        start_time = time.time()
+
+        parent_dir = os.path.dirname(os.path.abspath(directory))
+        output_directory = os.path.join(parent_dir,"segment")
+        base_filename = "Dental_0001_0000"
+        nifti_file = os.path.join(output_directory, base_filename + '.nii.gz')
+        os.makedirs(output_directory, exist_ok=True)
+        npImage = npVolume.transpose(2,1,0)
+
+        step = [0,0,0]
+        for i in range(3):
+            step[i] = (sorted_series_files[0][i+1] - sorted_series_files[h-1][i+1])/(1-h)
+
+        affine = numpy.array(
+        [[-direction_x[0] * dy, -direction_y[0] * dx, -step[0], -sorted_series_files[0][1]],
+         [-direction_x[1] * dy, -direction_y[1] * dx, -step[1], -sorted_series_files[0][2]],
+         [direction_x[2] * dy, direction_y[2] * dx, step[2], sorted_series_files[0][3]],
+         [0, 0, 0, 1]])
+
+        nii_image = nib.Nifti1Image(npImage, affine)
+        nii_image.header.set_slope_inter(1, 0)
+        nii_image.header.set_xyzt_units(2)  # set units for xyz (leave t as unknown)
+        # nii_image.to_filename(nifti_file)
+        nib.save(nii_image, nifti_file)
+
+        end_time = time.time()
+        print("Saving nifti file", end_time-start_time)
 
     start_time = time.time()
     npVolume = npVolume*(256.0/(max_npV-min_npV))
@@ -728,7 +758,7 @@ def load_dicom(directory,blendType=3,makenifti=False):
     mapper = vtk.vtkOpenGLGPUVolumeRayCastMapper()
     mapper.SetInputConnection(shiftScale.GetOutputPort())
     
-    """
+   
     mat = vtk.vtkMatrix4x4()
     for i in range(3):
         mat.SetElement(i,0,direction_x[i])
@@ -738,7 +768,7 @@ def load_dicom(directory,blendType=3,makenifti=False):
         i=i+1
 
     volume.SetUserMatrix(mat)
-    """
+   
     # max_npV, min_npV, adjThresholds
 
     # Transfer Function
@@ -845,4 +875,4 @@ def load_dicom(directory,blendType=3,makenifti=False):
     volume.SetMapper(mapper)
     volume.SetProperty(property)
 
-    return min_npV*iRescaleSlope+iRescaleIntercept,max_npV*iRescaleSlope+iRescaleIntercept, adjThresholds, volume
+    return min_npV*iRescaleSlope+iRescaleIntercept,max_npV*iRescaleSlope+iRescaleIntercept, adjThresholds, [dx,dy,dz], volume

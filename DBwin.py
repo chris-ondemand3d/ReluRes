@@ -2,10 +2,12 @@ import sys
 import numpy
 from pathlib import Path
 import subprocess, time
+from PIL import Image as im
 
 import pymongo
 import os, glob, json
 from bson import ObjectId
+import matplotlib.pyplot as plt
 
 from PySide6.QtGui import QGuiApplication, QWindow
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
@@ -16,11 +18,19 @@ from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkRenderer
 # load implementations for rendering and interaction factory classes
 import vtkmodules.vtkRenderingOpenGL2
 import vtkmodules.vtkInteractionStyle
+import vtkmodules.util.numpy_support
+from vtkmodules.vtkCommonTransforms import vtkTransform
 import QVTKRenderWindowInteractor as QVTK
 QVTKRenderWindowInteractor = QVTK.QVTKRenderWindowInteractor
+from vtkmodules.vtkInteractionWidgets import (
+    vtkBoxWidget,
+    vtkBoxWidget2,
+    vtkBoxRepresentation
+)
 import ScanDirectory 
 
 import vtk
+import nibabel as nib
 
 if QVTK.PyQtImpl == 'PySide6':
     from PySide6.QtCore import Qt
@@ -35,6 +45,7 @@ class TableModel(QAbstractTableModel):
     clickedButton = Signal(str)
     segment = Signal()
     rendermode = Signal()
+    renderDirection = Signal()
     captureScreen = Signal()
     saveComment = Signal(str)
 
@@ -110,6 +121,52 @@ class TableModel(QAbstractTableModel):
         return None
 
 
+# Extent class with vertex iterator
+class Extent:
+    def __init__(self, x1, x2, y1, y2, z1, z2):
+        self.x1, self.x2 = x1, x2
+        self.y1, self.y2 = y1, y2
+        self.z1, self.z2 = z1, z2
+
+    def vertices(self):
+        for x in (self.x1, self.x2):
+            for y in (self.y1, self.y2):
+                for z in (self.z1, self.z2):
+                    yield (x, y, z)
+
+
+def calculate_3d_extent(np_image, value):
+    """
+    Calculate the extent (x1, x2, y1, y2, z1, z2) of a 3D numpy array where elements have a specific value.
+    
+    Parameters:
+    np_image (numpy.ndarray): 3D numpy array
+    value: The specific value to search for in the array
+    
+    Returns:
+    tuple: (x1, x2, y1, y2, z1, z2) where (x1, y1, z1) is the minimum extent and (x2, y2, z2) is the maximum extent
+    """
+    # Find the indices where the value occurs
+    indices = numpy.where(np_image == value)
+    
+    if len(indices[0]) == 0:
+        return None  # Value not found in the array
+    
+    # Calculate the extents
+    x1, x2 = numpy.min(indices[0]), numpy.max(indices[0])
+    y1, y2 = numpy.min(indices[1]), numpy.max(indices[1])
+    z1, z2 = numpy.min(indices[2]), numpy.max(indices[2])
+    
+    return (x1, x2, y1, y2, z1, z2)
+
+def box_callback(obj, ev):
+    # Just do this to demonstrate who called callback and the event that triggered it.
+    # print(obj.class_name, 'Event Id:', ev)
+    t = vtkTransform()
+    obj.GetRepresentation().GetTransform(t)
+    # Remember to add the actor as an attribute before registering
+    # this callback with the object that it is observing.
+    box_callback.actor.user_transform = t
 
 class MAINApp(QQuickView):
     
@@ -135,7 +192,9 @@ class MAINApp(QQuickView):
 
         self.screenshotCount = 0
         self.rendermode = 3
+        self.renderDir = 1
         self.makeNifti = True
+        self.spacing = [.0, .0, .0]
 
         # Saturate TableModel   
         results = self.collection.find({}, {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "comment": 1, "_id": 1 })
@@ -152,8 +211,6 @@ class MAINApp(QQuickView):
         self.setTitle("Relu Result Viewer")
         self.resize(640, 960)
         self.setPosition(40,40)
-        #self.setProperty("x",40)
-        #self.setProperty("y",40)
 
         self.window = QMainWindow()
         self.window.resize(960,960)
@@ -174,6 +231,8 @@ class MAINApp(QQuickView):
         self.widget.Initialize()
         self.widget.Start()
 
+        print(self.widget.width(), self.widget.height())
+
         # models 
         self.nModel = 0
         self.volume = None
@@ -185,12 +244,14 @@ class MAINApp(QQuickView):
         self.rSinus = None
         self.lNerve = None
         self.rNerve = None
+        self.box_widget = None
 
         # Connect TableView.selectedRow to fill_study
         self.my_TableModel.selected.connect(self.set_buttons_status)
         self.my_TableModel.clickedButton.connect(self.add_model)
         self.my_TableModel.segment.connect(self.segment)
         self.my_TableModel.rendermode.connect(self.renderMode)
+        self.my_TableModel.renderDirection.connect(self.renderDirection)
         self.my_TableModel.captureScreen.connect(self.captureScreen)
         self.my_TableModel.saveComment.connect(self.saveComment)
 
@@ -212,6 +273,9 @@ class MAINApp(QQuickView):
         if (self.volume): 
             self.ren.RemoveVolume(self.volume)
             self.volume = None
+            if self.box_widget:
+                self.box_widget.Off()
+                self.box_widget = None
         if (self.mandible):
             self.mandible = None
             self.ren.RemoveActor(self.mandibleActor)
@@ -298,7 +362,7 @@ class MAINApp(QQuickView):
                         outdir = os.path.join(self.currentRow['path'],'segment')
                         if not os.path.exists(outdir):
                             os.makedirs(outdir)
-                self.min_npV, self.max_npV, self.adjThresholds, self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 3, self.makeNifti)
+                self.min_npV, self.max_npV, self.adjThresholds, self.spacing, self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 3, False) #self.makeNifti
                 self.ren.AddVolume(self.volume)
                 self.buttonStatus[0]=2
                 self.nModel+=1
@@ -316,8 +380,9 @@ class MAINApp(QQuickView):
                     reader.SetFileName(self.currentRow['mandible_path'])
                     reader.MergingOn()
                     reader.Update()
-                    self.mandible = reader.GetOutput()
-                    print("Open "+self.currentRow['mandible_path'])                    
+                    self.mandible = reader.GetOutput()                                        
+                    bound = self.mandible.GetBounds()
+                    print("Open "+self.currentRow['mandible_path'], bound)                    
                 self.mandibleMapper = vtkPolyDataMapper()
                 self.mandibleMapper.SetInputDataObject(self.mandible)
                 self.mandibleActor = vtkActor()
@@ -339,7 +404,8 @@ class MAINApp(QQuickView):
                     reader.MergingOn()
                     reader.Update()
                     self.maxilla = reader.GetOutput()
-                    print("Open " + self.currentRow['maxilla_path'])
+                    bound = self.maxilla.GetBounds()  
+                    print("Open " + self.currentRow['maxilla_path'], bound)
                 self.maxillaMapper = vtkPolyDataMapper()
                 self.maxillaMapper.SetInputDataObject(self.maxilla)
                 self.maxillaActor = vtkActor()
@@ -511,6 +577,8 @@ class MAINApp(QQuickView):
 
         self.widget.update()
 
+
+
     @Slot()
     def segment(self):
         print("segment")
@@ -536,6 +604,45 @@ class MAINApp(QQuickView):
             subprocess.run(nnunet_command, shell=True) #, executable="/bin/bash"
             end_time = time.time()
             print("segmentation time:", end_time-start_time)
+
+            # 1,2,3,4,5각각에 대해서, ijk extent -> xyz extent in world coordinate
+            # capture의 경우에는 Anterior, Left 두 view에서, 
+            outfile = os.path.join(output_dir,"Dental_0001.nii.gz")
+            img = nib.load(outfile)            
+            npImage = (img.get_fdata()).transpose(2,1,0)
+            extent = []
+            wcs_extent = []
+            xo,yo,zo = self.volume.GetOrigin()
+            for i in range(1,6):
+                extent.append(calculate_3d_extent(npImage,i))
+                k1, k2, j1, j2, i1, i2 = extent[i-1]
+                #(i1, j1, k1) to (x1, y1, z1)
+                x1 = i1*self.spacing[0]+xo
+                y1 = j1*self.spacing[1]+yo
+                z1 = k1*self.spacing[2]+zo
+                #(i2, j2, k2) to (x2, y2, z2)
+                x2 = i2*self.spacing[0]+xo
+                y2 = j2*self.spacing[1]+yo
+                z2 = k2*self.spacing[2]+zo                    
+                wcs_extent.append([x1,x2,y1,y2,z1,z2])
+                print(extent[i-1], wcs_extent[i-1], self.volume.GetBounds())
+                
+            self.box_widget = vtkBoxWidget()
+            self.box_widget.SetInteractor(self.widget)
+            self.box_widget.SetProp3D(self.volume)
+            self.box_widget.SetPlaceFactor(1.0)  # Make the box 1.25x larger than the actor
+            self.box_widget.PlaceWidget(wcs_extent[3])
+            """            
+            representation = vtkBoxRepresentation()
+            representation.PlaceWidget(self.volume.GetBounds())
+            self.box_widget = vtkBoxWidget2()
+            self.box_widget.SetRepresentation(representation)
+            self.box_widget.SetInteractor(self.widget)
+            box_callback.actor = representation
+            self.box_widget.AddObserver('EndInteractionEvent', box_callback)
+            """
+            self.box_widget.On()
+
         else:
             print("Error, directories not exist")
 
@@ -619,6 +726,7 @@ class MAINApp(QQuickView):
             property.SetSpecularPower(1.0)
             property.SetScalarOpacityUnitDistance(0.8919)             
             self.rendermode = 3
+            self.renderDir = 1
         
         property.SetColor(colorFun)
         property.SetScalarOpacity(opacityFun)
@@ -626,18 +734,90 @@ class MAINApp(QQuickView):
         self.widget.update()
 
     @Slot()
+    def renderDirection(self):
+            
+        # 1st entering, setup camera   
+        fp = numpy.array(self.ren.GetActiveCamera().GetFocalPoint())
+        p = numpy.array(self.ren.GetActiveCamera().GetPosition())
+        dist = self.ren.GetActiveCamera().GetDistance()
+        if self.renderDir == 3: # Head to Anterior     
+            # from Anterior 
+            self.ren.GetActiveCamera().SetPosition(fp[0], fp[1] - dist, fp[2])
+            self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
+            self.renderDir = 1 # Left
+        elif self.renderDir == 1:
+            # from Left
+            self.ren.GetActiveCamera().SetPosition(fp[0]+dist, fp[1], fp[2])
+            self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
+            self.renderDir = 2 # Left
+        elif self.renderDir == 2:
+            # from Head
+            self.ren.GetActiveCamera().SetPosition(fp[0], fp[1], fp[2]+dist)
+            self.ren.GetActiveCamera().SetViewUp(0.0, 1.0, 0.0);
+            self.renderDir = 3 # Left
+
+        self.ren.GetActiveCamera().ParallelProjectionOn()
+        self.ren.GetActiveCamera().GetViewTransformMatrix()
+        #print(self.ren.GetActiveCamera().GetViewTransformMatrix())
+        self.ren.ResetCameraClippingRange()
+        self.ren.ResetCamera()    
+        self.widget.update()
+
+    @Slot()
     def captureScreen(self):
         print("Capture")
+
+        coordinate = vtk.vtkCoordinate()
+        coordinate.SetCoordinateSystemToWorld()
+        vb = self.volume.GetBounds()
+        extent = Extent(*vb)
+        dispCoord = []
+        for i, vertex in enumerate(extent.vertices()):
+            coordinate.SetValue(vertex)
+            dispCoord.append(coordinate.GetComputedDisplayValue(self.ren))
+            print(i, vertex, dispCoord[i])
+
         winToImageFilter = vtk.vtkWindowToImageFilter()
         winToImageFilter.SetInput(self.widget.GetRenderWindow())
+        winToImageFilter.SetInputBufferTypeToRGB()
         winToImageFilter.Update()
+        vtk_data = winToImageFilter.GetOutput()
+
+        imgArray = vtkmodules.util.numpy_support.vtk_to_numpy(vtk_data.GetPointData().GetScalars())
+        x,y = self.widget.GetRenderWindow().GetSize()
+        imgArray = imgArray.reshape(x, y, 3)
+
+        # clip image
+        x,y = self.widget.GetRenderWindow().GetSize()
+        if (self.renderDir==1):   # Anterior to Posterior
+            x1 = dispCoord[0][0]
+            y1 = dispCoord[0][1]
+        elif (self.renderDir==2): # Left
+            x1 = dispCoord[4][0]
+            y1 = dispCoord[4][0]
+        elif (self.renderDir==3): # Head
+            x1 = dispCoord[1][0]
+            y1 = dispCoord[1][0]
+        print(x,y,x1,y1,x-x1,y-y1)
+        croppedArray = imgArray[y1:y-y1, x1:x-x1, :]
+        croppedArray = numpy.flipud(croppedArray)
         scrFileName = "scr_%d%d.png" % (self.rendermode, self.screenshotCount)
         print("Save to ",scrFileName)
         self.screenshotCount += 1
-        writer = vtk.vtkPNGWriter()
-        writer.SetFileName(scrFileName)
-        writer.SetInputData(winToImageFilter.GetOutput())
-        writer.Write()
+
+        data = im.fromarray(croppedArray) 
+        data.save(scrFileName)
+        """
+        fig, ax = plt.subplots()
+        # Display the array as an image
+        img = ax.imshow(croppedArray, cmap='viridis')
+        # Add a colorbar
+        plt.colorbar(img)
+        # Show the plot
+        plt.show()
+        """
+
+
 
     @Slot(str)
     def saveComment(self, commentText):

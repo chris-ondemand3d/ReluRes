@@ -287,6 +287,12 @@ Item {
                 onClicked: my_TableModel.rendermode()
             }
             Button {
+                id: renderDirection
+                width: 48; height: 24
+                text: "Rendering Direction"
+                onClicked: my_TableModel.renderDirection()
+            }
+            Button {
                 id: captureId
                 width: 48; height: 24
                 text: "Capture"
