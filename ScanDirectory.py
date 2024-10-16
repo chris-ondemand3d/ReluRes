@@ -21,7 +21,7 @@ import numpy
 import vtk
 import matplotlib.pyplot as plt
 #import cv2
-import SimpleITK as sitk
+#import SimpleITK as sitk
 from scipy import ndimage
 from scipy.signal import argrelextrema
 from skimage import data

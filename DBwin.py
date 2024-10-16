@@ -48,6 +48,7 @@ class TableModel(QAbstractTableModel):
     renderDirection = Signal()
     captureScreen = Signal()
     saveComment = Signal(str)
+    dataChanged = Signal(QModelIndex, QModelIndex)
 
     COLUMN_NAMES = ["patient_ID", "patient_Name", "studyUID", "studyDate", "Comment"]
 
@@ -66,6 +67,7 @@ class TableModel(QAbstractTableModel):
         for x in studies:
             self.rows.append(list(x.values())[1:])
             #print(list(x.values())[1:])
+
     def update_comment(self, row, comment_str):
         self.rows[row]['comment']=comment_str
 
@@ -360,6 +362,7 @@ class MAINApp(QQuickView):
         }
         results = self.collection.find( filter=filter )
         res = list(results)
+        self.rowNum = row
         self.currentRow = res[0]
         #print(self.currentRow)
         self.studyUID = self.currentRow['study_uid']
@@ -1031,6 +1034,7 @@ class MAINApp(QQuickView):
             # self.currentRow = objid in mongodb
             # update comment 
             self.collection.update_one( { "_id": ObjectId(self.currentRow['_id'])}, [ { "$set" : { "comment": commentText } }] )
-            # self.currentRow
-            # emit dataChanged(index, index);
+            self.my_TableModel.update_comment(self.rowNum,commentText)
+            Index = QModelIndex(self.rowNum)
+            self.my_TableModel.dataChanged.emit(Index, Index)
         
