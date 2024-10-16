@@ -14,7 +14,7 @@
 ###########################################################################################
 
 import sys, os
-import time
+import subprocess, time
 
 import gdcm
 import numpy
@@ -29,6 +29,8 @@ from skimage.filters import threshold_multiotsu
 
 import dicom2nifti.convert_dir as convert_directory
 import nibabel as nib
+from scipy.ndimage import label
+MinConnectedVoxel = 5000
 
 class ProgressWatcher(gdcm.SimpleSubjectWatcher):
     def ShowProgress(self, sender, event):
@@ -89,7 +91,7 @@ def toList(a):
 	return float_numbers
 
 def getKey(item):
-    return item[3]
+    return item[2]
 
 def GetSpacingDirOrigin(ds):
     sSFG = gdcm.Tag(0x5200, 0x9229) # Shared Functional Group 
@@ -195,7 +197,7 @@ def GetSpacingDirOrigin(ds):
         else:
             bFlip = False
             origin= pos0
-        return imageOrientation,sliceThickness,origin,pixelSpacing,abs(dist),bFlip        
+        return imageOrientation,sliceThickness,origin,pixelSpacing,abs(dist),bFlip,pos0,pos1    
     else:
         return -1
 
@@ -319,7 +321,14 @@ def show_slices(slices):
        axes[i].imshow(slice, cmap="gray", origin="lower")
    plt.show()
 
-
+def find_connected_elements_3d(m, v):
+    # Create a binary mask where elements equal to v are True, others are False
+    mask = (m == v)    
+    # Use scipy's label function to identify connected components
+    labeled_array, num_features = label(mask)
+    # Get the indices for each labeled region
+    indices = [numpy.argwhere(labeled_array == i) for i in range(1, num_features + 1)]
+    return indices
 def load_dicom(directory,blendType=3,makenifti=False):
 
     # Define the set of tags we are interested in, may need more
@@ -476,7 +485,8 @@ def load_dicom(directory,blendType=3,makenifti=False):
                 {'PatientID': patient_id, 'StudyID': study_id, 'SeriesID': series_id, 'Multiframe': is_multiframe,
                  'InstanceUID': instance_id, 'FileName': dFile})
             
-    if (len(series_list)>1 and len(series_list)==0): return None # many series or no series
+    if (len(series_list)>1 and len(series_list)==0): 
+        return None # many series or no series
     else:     
         series_uid = series_list[0]
 
@@ -501,7 +511,7 @@ def load_dicom(directory,blendType=3,makenifti=False):
                     return None
                 else:
                     image = reader.GetImage()
-                    npVolume = gdcm_to_numpy(image)
+                    npVolume = gdcm_to_numpy(image).copy()
                     print("Shape of Volume:", npVolume.shape)
 
                     # Image Dimension
@@ -511,12 +521,14 @@ def load_dicom(directory,blendType=3,makenifti=False):
                     f = reader.GetFile()
                     ds = f.GetDataSet()
                     
-                    dirCosines, sliceThickness, origin, pixelSpacing, dz, bFlip = GetSpacingDirOrigin(ds)
+                    dirCosines, sliceThickness, origin, pixelSpacing, dz, bFlip,pos0,pos1 = GetSpacingDirOrigin(ds)
                     print(dirCosines, sliceThickness, origin, pixelSpacing, dz, bFlip) 
                     dx = pixelSpacing[0]
                     dy = pixelSpacing[1]
                     if (bFlip):
                         npVolume = numpy.flip(npVolume,0)
+                    max_npV = npVolume.max()
+                    min_npV = npVolume.min()
 
                     print("Samples per Pixel:", s.GetValue(image_file, t12))
                     print("Photometric Representation:", s.GetValue(image_file, t13))
@@ -571,17 +583,31 @@ def load_dicom(directory,blendType=3,makenifti=False):
                 # convert ImagePosition
                 strIP = s.GetValue(series_imgfiles[i], t8)
                 posV = toList(strIP)
-                series_files.append([series_imgfiles[i], posV[0], posV[1], posV[2]])
+                series_files.append([series_imgfiles[i], posV])
+            origin = series_files[0][1]
+            pixelSpacing = toList(s.GetValue(series_files[0][0], t10))
+            dirCosines = toList(s.GetValue(series_files[0][0], t11))
+            rowCosine = numpy.array(dirCosines[:3])
+            colCosine = numpy.array(dirCosines[3:])
+            sliceCosine = numpy.cross(rowCosine,colCosine)
+
+            if len(series_files)>1:
+                slice_distances = []              
+                for i in range(1,len(series_files)):
+                    distance = numpy.linalg.norm(numpy.array(series_files[i][1])-numpy.array(series_files[i-1][1]))
+                    slice_distances.append(distance)      
+                avg_slice_distance = numpy.mean(slice_distances)
+            else:
+                avg_slice_distance = None
+
+            for i in range(len(series_files)):
+                series_files[i].append([numpy.dot((numpy.array(series_files[i][1])-numpy.array(origin)),sliceCosine)])
 
             sorted_series_files = sorted(series_files, key=getKey, reverse=False)
 
-            dx = sorted_series_files[1][1] - sorted_series_files[0][1]
-            dy = sorted_series_files[1][2] - sorted_series_files[0][2]
-            dz = sorted_series_files[1][3] - sorted_series_files[0][3]
-            if (dx != 0 or dy != 0):
-                print("Weird, Not simple axial format", dx, dy, dz)  # Not simple axial format
-            else:
-                print("Slice distance", dz)
+            dx = pixelSpacing[0]
+            dy = pixelSpacing[1]            
+            dz = avg_slice_distance
 
             reader = gdcm.ImageReader()
             reader.SetFileName(sorted_series_files[0][0])
@@ -595,12 +621,10 @@ def load_dicom(directory,blendType=3,makenifti=False):
             w, d, h = image.GetDimension(0), image.GetDimension(1), len(sorted_series_files)
 
             spacing = image.GetSpacing()
-            dx = float(spacing[0])
-            dy = float(spacing[1])
 
             dtype = get_numpy_array_type(pf.GetScalarType())
             npVolume = numpy.zeros((h, w, d), dtype=dtype)
-            print(w, d, h, dtype,dx,dy,dz)
+            print(w, d, h, dtype, dx, dy, dz)
 
             for i in range(h):
                 reader = gdcm.ImageReader()
@@ -615,17 +639,14 @@ def load_dicom(directory,blendType=3,makenifti=False):
 
             # Load images to numpy
             # 1st file에서 image plane, pixel정보 추출
-            print("Pixel Spacing:", s.GetValue(sorted_series_files[0][0], t10))
-            print("Image Orientation:", s.GetValue(sorted_series_files[0][0], t11))
-            print("Origin:",sorted_series_files[0][1],sorted_series_files[0][2],sorted_series_files[0][3])
+            print("Pixel Spacing:", pixelSpacing)
+            print("Image Orientation:", dirCosines)
+            print("Origin:",origin)
             print("Samples per Pixel:", s.GetValue(sorted_series_files[0][0], t12))
             print("Photometric Representation:", s.GetValue(sorted_series_files[0][0], t13))
             print("Rows:", s.GetValue(sorted_series_files[0][0], t14))
             print("Columns:", s.GetValue(sorted_series_files[0][0], t15))
             print("BitStored:", s.GetValue(sorted_series_files[0][0], t16))
-            
-            dirCosines = toList(s.GetValue(sorted_series_files[0][0], t11))
-            origin = [sorted_series_files[0][1],sorted_series_files[0][2],sorted_series_files[0][3]]
 
             max_npV = npVolume.max()
             min_npV = npVolume.min()
@@ -660,6 +681,9 @@ def load_dicom(directory,blendType=3,makenifti=False):
             if s26 or (max_npV-min_npV)>= 4096:
                 print("16bit data and rescale intercept", s26, s27)
 
+        direction_x = dirCosines[0:3]
+        direction_y = dirCosines[3:6]
+        direction_z = numpy.cross(direction_x,direction_y)
         # pyplot single slice
         x = numpy.arange(0.0, (w+1)*dx, dx)
         y = numpy.arange(0.0, (d+1)*dy, dy)
@@ -669,9 +693,6 @@ def load_dicom(directory,blendType=3,makenifti=False):
 
         print("min, max, rescaleSlope, Intercept: ",npVolume.min(),npVolume.max(), iRescaleSlope, iRescaleIntercept)
     
-        direction_x = dirCosines[0:3]
-        direction_y = dirCosines[3:6]
-        direction_z = numpy.cross(direction_x,direction_y)
         # direction = numpy.direction_x,direction_y,direction_z
         # print([dx, dy, dz], origin, direction_x,direction_y, direction_z)
 
@@ -685,6 +706,18 @@ def load_dicom(directory,blendType=3,makenifti=False):
     # Test for Removing some outlier, [npV_min, npV_min + 0.05*(max_npV-min_npV)]->0-rescale intercept, [npV_max-0.05*(max_npV-min_npV) ,npV_max] 값을 조정 
     npVolume[npVolume < (min_npV + 0.005*(max_npV-min_npV))] = 0
 
+    start_time = time.time()
+
+    npVol = npVolume*(256.0/(max_npV-min_npV))
+
+    thresholds = threshold_multiotsu(npVol,4)
+    end_time = time.time()
+    adjThresholds = []
+    for i in thresholds:
+        #print(i*((max_npV-min_npV)/256.0), i*16, (i*16)*iRescaleSlope+iRescaleIntercept) 
+        # original CT value, 4096 scale, applying rescale
+        adjThresholds.append(i*((max_npV-min_npV)/256.0)*iRescaleSlope+iRescaleIntercept)
+    print(adjThresholds, end_time-start_time)
 
     # makenifti files with directory, output_directory
     if makenifti:
@@ -704,13 +737,20 @@ def load_dicom(directory,blendType=3,makenifti=False):
         npImage = npVolume.transpose(2,1,0)
 
         step = [0,0,0]
-        for i in range(3):
-            step[i] = (sorted_series_files[0][i+1] - sorted_series_files[h-1][i+1])/(1-h)
+        # TODO in case of multivolume
+        if is_multiframe != 0:
+            for i in range(3):
+                step[i] = (pos0[i] - pos1[i])/(1-h)
+        else:
+            pos0 = sorted_series_files[0][1]
+            pos1 = sorted_series_files[h-1][1]
+            for i in range(3):
+                step[i] = (pos0[i] - pos1[i])/(1-h)
 
         affine = numpy.array(
-        [[-direction_x[0] * dy, -direction_y[0] * dx, -step[0], -sorted_series_files[0][1]],
-         [-direction_x[1] * dy, -direction_y[1] * dx, -step[1], -sorted_series_files[0][2]],
-         [direction_x[2] * dy, direction_y[2] * dx, step[2], sorted_series_files[0][3]],
+        [[-direction_x[0] * dy, -direction_y[0] * dx, -step[0], -origin[0]],
+         [-direction_x[1] * dy, -direction_y[1] * dx, -step[1], -origin[1]],
+         [direction_x[2] * dy, direction_y[2] * dx, step[2], origin[2]],
          [0, 0, 0, 1]])
 
         nii_image = nib.Nifti1Image(npImage, affine)
@@ -722,18 +762,7 @@ def load_dicom(directory,blendType=3,makenifti=False):
         end_time = time.time()
         print("Saving nifti file", end_time-start_time)
 
-    start_time = time.time()
-    npVolume = npVolume*(256.0/(max_npV-min_npV))
 
-    thresholds = threshold_multiotsu(npVolume,4)
-    end_time = time.time()
-    print(end_time-start_time)
-    adjThresholds = []
-    for i in thresholds:
-        #print(i*((max_npV-min_npV)/256.0), i*16, (i*16)*iRescaleSlope+iRescaleIntercept) 
-        # original CT value, 4096 scale, applying rescale
-        adjThresholds.append(i*((max_npV-min_npV)/256.0)*iRescaleSlope+iRescaleIntercept)
-    print(adjThresholds)
 
     (xMin, xMax, yMin, yMax, zMin, zMax) = dataImporter.GetWholeExtent()
     (xSpacing, ySpacing, zSpacing) = dataImporter.GetDataSpacing()
@@ -758,14 +787,16 @@ def load_dicom(directory,blendType=3,makenifti=False):
     mapper = vtk.vtkOpenGLGPUVolumeRayCastMapper()
     mapper.SetInputConnection(shiftScale.GetOutputPort())
     
-   
+    rotation_matrix = numpy.column_stack((rowCosine, colCosine, sliceCosine))
+    # Create the 4x4 transformation matrix
+    transform_matrix = numpy.eye(3)
+    transform_matrix[:3, :3] = rotation_matrix.T
+    
     mat = vtk.vtkMatrix4x4()
     for i in range(3):
-        mat.SetElement(i,0,direction_x[i])
-        mat.SetElement(i,1,direction_y[i])
-        mat.SetElement(i,2,direction_z[i])
+        for j in range(3):
+            mat.SetElement(i,j,transform_matrix[i,j])
         mat.SetElement(i,3,-origin[i])
-        i=i+1
 
     volume.SetUserMatrix(mat)
    

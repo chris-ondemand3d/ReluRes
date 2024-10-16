@@ -66,6 +66,8 @@ class TableModel(QAbstractTableModel):
         for x in studies:
             self.rows.append(list(x.values())[1:])
             #print(list(x.values())[1:])
+    def update_comment(self, row, comment_str):
+        self.rows[row]['comment']=comment_str
 
     def data(self, index, role=Qt.DisplayRole):
         """ Depending on the index and role given, return data. If not 
@@ -135,6 +137,21 @@ class Extent:
                     yield (x, y, z)
 
 
+from scipy.ndimage import label
+MinConnectedVoxel = 5000
+
+def find_connected_elements_3d(m, v):
+    # Create a binary mask where elements equal to v are True, others are False
+    mask = (m == v)
+    
+    # Use scipy's label function to identify connected components
+    labeled_array, num_features = label(mask)
+    
+    # Get the indices for each labeled region
+    indices = [numpy.argwhere(labeled_array == i) for i in range(1, num_features + 1)]
+    
+    return indices
+
 def calculate_3d_extent(np_image, value):
     """
     Calculate the extent (x1, x2, y1, y2, z1, z2) of a 3D numpy array where elements have a specific value.
@@ -147,17 +164,35 @@ def calculate_3d_extent(np_image, value):
     tuple: (x1, x2, y1, y2, z1, z2) where (x1, y1, z1) is the minimum extent and (x2, y2, z2) is the maximum extent
     """
     # Find the indices where the value occurs
+    connected_indices = find_connected_elements_3d(np_image, value)
+    print("num of connected_indices:", len(connected_indices))
+
+    firstTime = True
+    for i, group in enumerate(connected_indices):
+        print(value, i, group,group.shape)
+        if (group.shape)[0]>=MinConnectedVoxel:
+            if (firstTime): 
+                indices = numpy.copy(group)
+                firstTime = False
+            else: indices = numpy.concatenate((indices, group), axis=0)            
+    """
     indices = numpy.where(np_image == value)
-    
     if len(indices[0]) == 0:
         return None  # Value not found in the array
-    
+
     # Calculate the extents
     x1, x2 = numpy.min(indices[0]), numpy.max(indices[0])
     y1, y2 = numpy.min(indices[1]), numpy.max(indices[1])
     z1, z2 = numpy.min(indices[2]), numpy.max(indices[2])
+    """
     
-    return (x1, x2, y1, y2, z1, z2)
+    if (not firstTime): # Calculate the extents
+        x1, x2 = numpy.min(indices[:,0]), numpy.max(indices[:,0])
+        y1, y2 = numpy.min(indices[:,1]), numpy.max(indices[:,1])
+        z1, z2 = numpy.min(indices[:,2]), numpy.max(indices[:,2])
+        return x1, x2, y1, y2, z1, z2
+    else:
+        return 0,0,0,0,0,0
 
 def box_callback(obj, ev):
     # Just do this to demonstrate who called callback and the event that triggered it.
@@ -195,11 +230,68 @@ class MAINApp(QQuickView):
         self.renderDir = 1
         self.makeNifti = True
         self.spacing = [.0, .0, .0]
+        results = self.collection.aggregate([
+        {
+            '$project': {
+                'path': 1, 
+                'missing_teeth_numbers': {
+                    '$filter': {
+                        'input': '$teeth', 
+                        'as': 'tooth', 
+                        'cond': {
+                            '$eq': [
+                                '$$tooth.missing', True
+                            ]
+                        }
+                    }
+                }
+            }
+        }, {
+            '$addFields': {
+                'missing_teeth_numbers': {
+                    '$map': {
+                        'input': '$missing_teeth_numbers', 
+                        'as': 'tooth', 
+                        'in': '$$tooth.number'
+                    }
+                }, 
+                'missing_teeth_count': {
+                    '$size': '$missing_teeth_numbers'
+                }
+            }
+        }, {
+            '$match': {
+                'missing_teeth_count': {
+                    '$lte': 6
+                }
+            }
+        }, {
+            '$project': { 
+                '_id': 1,
+                'path': 1,
+                'missing_teeth_numbers': 1
+            }
+        }])
+
+        res = list(results)
+        self.allres = []
+        for i in range(len(res)): 
+            for j in res[i]["missing_teeth_numbers"]:
+                if j==35 or j==45: 
+                    #print(res[i]["_id"], res[i]["path"], res[i]["missing_teeth_numbers"])
+                    results = self.collection.find({'_id': res[i]["_id"]}, {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "comment": 1, "_id": 1 })
+                    rec = list(results)
+                    #rec[0]["study_date"] = str(rec[0]["study_date"])
+                    #rec[0]["comment"] = str(rec[0]["comment"])
+                    self.allres.append(*rec)
 
         # Saturate TableModel   
-        results = self.collection.find({}, {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "comment": 1, "_id": 1 })
-        self.allres = list(results)
-        #print(self.allres)
+        #results = self.collection.find({}, {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "comment": 1, "_id": 1 })
+
+        #self.allres = list(results)
+        # print(self.allres)
+        self.studyUID = None
+
         self.my_TableModel = TableModel()
         self.my_TableModel.fill_row(self.allres)
 
@@ -245,6 +337,9 @@ class MAINApp(QQuickView):
         self.lNerve = None
         self.rNerve = None
         self.box_widget = None
+        self.box_widget1 = None
+        self.box_widget2 = None
+        self.box_widget3 = None
 
         # Connect TableView.selectedRow to fill_study
         self.my_TableModel.selected.connect(self.set_buttons_status)
@@ -266,7 +361,9 @@ class MAINApp(QQuickView):
         results = self.collection.find( filter=filter )
         res = list(results)
         self.currentRow = res[0]
-        #print(self.currentRow['_id'])
+        #print(self.currentRow)
+        self.studyUID = self.currentRow['study_uid']
+        print("Current studyUID:",self.studyUID)
 
         #Clean up the model
         self.nModel = 0
@@ -275,7 +372,13 @@ class MAINApp(QQuickView):
             self.volume = None
             if self.box_widget:
                 self.box_widget.Off()
+                self.box_widget1.Off()
+                self.box_widget2.Off()
+                self.box_widget3.Off()
                 self.box_widget = None
+                self.box_widget1 = None
+                self.box_widget2 = None
+                self.box_widget3 = None
         if (self.mandible):
             self.mandible = None
             self.ren.RemoveActor(self.mandibleActor)
@@ -362,7 +465,7 @@ class MAINApp(QQuickView):
                         outdir = os.path.join(self.currentRow['path'],'segment')
                         if not os.path.exists(outdir):
                             os.makedirs(outdir)
-                self.min_npV, self.max_npV, self.adjThresholds, self.spacing, self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 3, False) #self.makeNifti
+                self.min_npV, self.max_npV, self.adjThresholds, self.spacing, self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 3, True) #self.makeNifti
                 self.ren.AddVolume(self.volume)
                 self.buttonStatus[0]=2
                 self.nModel+=1
@@ -564,6 +667,7 @@ class MAINApp(QQuickView):
             # world coordinate bounding box () - (x1,y1,z1,x2,y2,z2)->(x1,y2,z1),(x2,y1,z1),(x2,y2,z1), (x1,y1,z2), (x1,y2,z2), (x2,y1,z2)
             #print(self.window.)
             print("Renderwindow size:",self.widget.GetRenderWindow().GetSize())
+            """
             xy = self.volume.GetBounds()
             print(xy)
             coordinate = vtk.vtkCoordinate()
@@ -574,7 +678,7 @@ class MAINApp(QQuickView):
             viewCoord = coordinate.GetComputedViewportValue(self.ren)
             dispCoord = coordinate.GetComputedDisplayValue(self.ren)
             print(viewCoord, dispCoord) 
-
+            """
         self.widget.update()
 
 
@@ -605,33 +709,72 @@ class MAINApp(QQuickView):
             end_time = time.time()
             print("segmentation time:", end_time-start_time)
 
+            # 1,2,3,4,5 각각에 대해서 Rule이 필요할 듯
+            # maxilla는 있으면, 가장 큰 component 하나만 
+            # mandible은 있으면, 최대 두개의 component
+            # condyle(left, right) -> 이부분은 200장 정도 manual labeling 해야할 듯..
+
+            # upper -> maxilla 있는경우, 그보다 1.2배, 없는경우는 그대로...
+            
+            # lower -> upper 있는 경우, 그보다 1.2배, upper가 없는 경우, 
+
+
+
             # 1,2,3,4,5각각에 대해서, ijk extent -> xyz extent in world coordinate
             # capture의 경우에는 Anterior, Left 두 view에서, 
             outfile = os.path.join(output_dir,"Dental_0001.nii.gz")
             img = nib.load(outfile)            
             npImage = (img.get_fdata()).transpose(2,1,0)
+            unique_labels = numpy.unique(npImage)
+
             extent = []
-            wcs_extent = []
+            self.wcs_extent = []
             xo,yo,zo = self.volume.GetOrigin()
+            seg_label=[]
             for i in range(1,6):
-                extent.append(calculate_3d_extent(npImage,i))
-                k1, k2, j1, j2, i1, i2 = extent[i-1]
-                #(i1, j1, k1) to (x1, y1, z1)
-                x1 = i1*self.spacing[0]+xo
-                y1 = j1*self.spacing[1]+yo
-                z1 = k1*self.spacing[2]+zo
-                #(i2, j2, k2) to (x2, y2, z2)
-                x2 = i2*self.spacing[0]+xo
-                y2 = j2*self.spacing[1]+yo
-                z2 = k2*self.spacing[2]+zo                    
-                wcs_extent.append([x1,x2,y1,y2,z1,z2])
-                print(extent[i-1], wcs_extent[i-1], self.volume.GetBounds())
+                if (i not in unique_labels): # not segmented
+                    extent.append([0,0,0,0,0,0])
+                    self.wcs_extent([.0,.0,.0,.0,.0,.0])
+                    seg_label.append(False)
+                else:
+                    seg_label.append(True)
+                    extent.append(calculate_3d_extent(npImage,i))   
+                    k1, k2, j1, j2, i1, i2 = extent[i-1]
+                    #(i1, j1, k1) to (x1, y1, z1)
+                    x1 = i1*self.spacing[0]+xo
+                    y1 = j1*self.spacing[1]+yo
+                    z1 = k1*self.spacing[2]+zo
+                    #(i2, j2, k2) to (x2, y2, z2)
+                    x2 = i2*self.spacing[0]+xo
+                    y2 = j2*self.spacing[1]+yo
+                    z2 = k2*self.spacing[2]+zo                    
+                    self.wcs_extent.append([x1,x2,y1,y2,z1,z2])
+                    print(extent[i-1], self.wcs_extent[i-1], self.volume.GetBounds())
                 
             self.box_widget = vtkBoxWidget()
             self.box_widget.SetInteractor(self.widget)
             self.box_widget.SetProp3D(self.volume)
             self.box_widget.SetPlaceFactor(1.0)  # Make the box 1.25x larger than the actor
-            self.box_widget.PlaceWidget(wcs_extent[3])
+            self.box_widget.PlaceWidget(self.wcs_extent[0])
+
+            self.box_widget1 = vtkBoxWidget()
+            self.box_widget1.SetInteractor(self.widget)
+            self.box_widget1.SetProp3D(self.volume)
+            self.box_widget1.SetPlaceFactor(1.0)  # Make the box 1.25x larger than the actor
+            self.box_widget1.PlaceWidget(self.wcs_extent[1])
+
+            self.box_widget2 = vtkBoxWidget()
+            self.box_widget2.SetInteractor(self.widget)
+            self.box_widget2.SetProp3D(self.volume)
+            self.box_widget2.SetPlaceFactor(1.0)  # Make the box 1.25x larger than the actor
+            self.box_widget2.PlaceWidget(self.wcs_extent[2])
+            
+            self.box_widget3 = vtkBoxWidget()
+            self.box_widget3.SetInteractor(self.widget)
+            self.box_widget3.SetProp3D(self.volume)
+            self.box_widget3.SetPlaceFactor(1.0)  # Make the box 1.25x larger than the actor
+            self.box_widget3.PlaceWidget(self.wcs_extent[3])
+
             """            
             representation = vtkBoxRepresentation()
             representation.PlaceWidget(self.volume.GetBounds())
@@ -642,6 +785,9 @@ class MAINApp(QQuickView):
             self.box_widget.AddObserver('EndInteractionEvent', box_callback)
             """
             self.box_widget.On()
+            self.box_widget1.On()
+            self.box_widget2.On()
+            self.box_widget3.On()
 
         else:
             print("Error, directories not exist")
@@ -744,7 +890,7 @@ class MAINApp(QQuickView):
             # from Anterior 
             self.ren.GetActiveCamera().SetPosition(fp[0], fp[1] - dist, fp[2])
             self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
-            self.renderDir = 1 # Left
+            self.renderDir = 1 # Anterior
         elif self.renderDir == 1:
             # from Left
             self.ren.GetActiveCamera().SetPosition(fp[0]+dist, fp[1], fp[2])
@@ -754,7 +900,7 @@ class MAINApp(QQuickView):
             # from Head
             self.ren.GetActiveCamera().SetPosition(fp[0], fp[1], fp[2]+dist)
             self.ren.GetActiveCamera().SetViewUp(0.0, 1.0, 0.0);
-            self.renderDir = 3 # Left
+            self.renderDir = 3 # Head
 
         self.ren.GetActiveCamera().ParallelProjectionOn()
         self.ren.GetActiveCamera().GetViewTransformMatrix()
@@ -792,21 +938,80 @@ class MAINApp(QQuickView):
         if (self.renderDir==1):   # Anterior to Posterior
             x1 = dispCoord[0][0]
             y1 = dispCoord[0][1]
+            x2 = dispCoord[5][0]
+            y2 = dispCoord[5][1]
         elif (self.renderDir==2): # Left
             x1 = dispCoord[4][0]
-            y1 = dispCoord[4][0]
+            y1 = dispCoord[4][1]
+            x2 = dispCoord[7][0]
+            y2 = dispCoord[7][1]
         elif (self.renderDir==3): # Head
             x1 = dispCoord[1][0]
-            y1 = dispCoord[1][0]
-        print(x,y,x1,y1,x-x1,y-y1)
-        croppedArray = imgArray[y1:y-y1, x1:x-x1, :]
+            y1 = dispCoord[1][1]
+            x2 = dispCoord[7][0]
+            y2 = dispCoord[7][1]
+
+        if (x1<x-x2): dx= x1 
+        else: dx = x-x2
+        if (y1<y-y2): dy= y1 
+        else: dy = y-y2
+
+        croppedArray = imgArray[dy:y-dy+1, dx:x-dx+1, :]
         croppedArray = numpy.flipud(croppedArray)
-        scrFileName = "scr_%d%d.png" % (self.rendermode, self.screenshotCount)
+        scrFileName = "%s_%d%d%d.png" % (self.studyUID, self.rendermode, self.renderDir, self.screenshotCount)
+        txtFileName = "%s_%d%d%d.txt" % (self.studyUID, self.rendermode, self.renderDir, self.screenshotCount)
         print("Save to ",scrFileName)
         self.screenshotCount += 1
 
+        xx= x-2*dx-1 #column
+        yy= y-2*dy-1 #row
+
+        if (self.wcs_extent):
+
+            txtFile = open(txtFileName, "w")
+
+            for j,seg_extent in enumerate(self.wcs_extent):
+                sb = Extent(*seg_extent)
+                dpCoord = []
+                for i, vertex in enumerate(sb.vertices()):
+                    coordinate.SetValue(vertex)
+                    dpCoord.append(coordinate.GetComputedDisplayValue(self.ren))
+                
+                if (self.renderDir==1):   # Anterior to Posterior
+                    xx1 = dpCoord[0][0]
+                    yy1 = y-dpCoord[0][1]-1
+                    xx2 = dpCoord[5][0]
+                    yy2 = y-dpCoord[5][1]-1
+                elif (self.renderDir==2): # Left
+                    xx1 = dpCoord[4][0]
+                    yy1 = y-dpCoord[4][1]-1
+                    xx2 = dpCoord[7][0]
+                    yy2 = y-dpCoord[7][1]-1
+
+                elif (self.renderDir==3): # Head
+                    xx1 = dpCoord[1][0]
+                    yy1 = y-dpCoord[1][1]-1
+                    xx2 = dpCoord[7][0]
+                    yy2 = y-dpCoord[7][1]-1
+                del dpCoord           
+
+                print("Segment:",j)
+                cx, cy = (xx1+xx2-2*dx)/(2*xx), (yy1+yy2-2*dy)/(2*yy)
+                width, height = (xx2-xx1)/xx, (yy1-yy2)/yy
+                print(x, y, dx, dy, xx, yy, xx1, yy1, xx2, yy2)
+                print(xx1-dx, yy1-dy, xx2-dx, yy2-dy)
+                print((xx1-dx)/xx, (yy1-dy)/yy, (xx2-dx)/xx, (yy2-dy)/yy)
+                print(cx,cy,width,height)
+                txtFile.write(f"{j} {cx} {cy} {width} {height}\n")
+
+            txtFile.close()
+
+            
+        # wcs to disp, vol.bounds to crop, segmented bounds ratio(center(x,y), width, height), save to text file
+        
         data = im.fromarray(croppedArray) 
         data.save(scrFileName)
+        
         """
         fig, ax = plt.subplots()
         # Display the array as an image
@@ -826,3 +1031,6 @@ class MAINApp(QQuickView):
             # self.currentRow = objid in mongodb
             # update comment 
             self.collection.update_one( { "_id": ObjectId(self.currentRow['_id'])}, [ { "$set" : { "comment": commentText } }] )
+            # self.currentRow
+            # emit dataChanged(index, index);
+        
