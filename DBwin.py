@@ -67,7 +67,6 @@ class TableModel(QAbstractTableModel):
         for x in studies:
             self.rows.append(list(x.values())[1:])
             #print(list(x.values())[1:])
-
     def update_comment(self, row, comment_str):
         self.rows[row]['comment']=comment_str
 
@@ -362,8 +361,8 @@ class MAINApp(QQuickView):
         }
         results = self.collection.find( filter=filter )
         res = list(results)
-        self.rowNum = row
         self.currentRow = res[0]
+        self.rowNum = row
         #print(self.currentRow)
         self.studyUID = self.currentRow['study_uid']
         print("Current studyUID:",self.studyUID)
@@ -642,6 +641,7 @@ class MAINApp(QQuickView):
                     self.ren.RemoveActor(self.rNerveActor)
                     self.buttonStatus[8] = 1
 
+
         self.my_TableModel.changeButtonStatus.emit(self.buttonStatus)        
 
         #DICOM is LPS (to L to P to Superior)
@@ -822,7 +822,6 @@ class MAINApp(QQuickView):
             opacityFun.AddPoint(self.adjThresholds[2], 0.5, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
             opacityFun.AddPoint(self.max_npV, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
             
-            
             gradientFun.AddPoint(self.min_npV, 1.0, 0.5,.0)
             gradientFun.AddPoint(self.min_npV + (self.max_npV-self.min_npV)*0.2,.0,0.5,.0)
             #gradientFun.AddPoint(28.,.0,0.0,.0)
@@ -875,7 +874,7 @@ class MAINApp(QQuickView):
             property.SetSpecularPower(1.0)
             property.SetScalarOpacityUnitDistance(0.8919)             
             self.rendermode = 3
-            self.renderDir = 1
+
         
         property.SetColor(colorFun)
         property.SetScalarOpacity(opacityFun)
@@ -1025,8 +1024,6 @@ class MAINApp(QQuickView):
         plt.show()
         """
 
-
-
     @Slot(str)
     def saveComment(self, commentText):
         print("saveComment")
@@ -1037,4 +1034,3 @@ class MAINApp(QQuickView):
             self.my_TableModel.update_comment(self.rowNum,commentText)
             Index = QModelIndex(self.rowNum)
             self.my_TableModel.dataChanged.emit(Index, Index)
-        
