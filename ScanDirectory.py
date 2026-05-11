@@ -1,777 +1,427 @@
-###########################################################################################
-#
-#  Program: Console app to scan directory, load dicom series, and render the series volume
-#  using GDCM (Grassroots DICOM). A DICOM library ( > 2.8.6 version required by performance)
-#
-#  Copyright (c) 2006-2011 Mathieu Malaterre
-#  All rights reserved.
-#  See Copyright.txt or http://gdcm.sourceforge.net/Copyright.html for details.
-#
-#     This software is distributed WITHOUT ANY WARRANTY; without even
-#     the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
-#     PURPOSE.  See the above copyright notice for more information.
-#
-###########################################################################################
-
 import sys, os
-import subprocess, time
+import time
 
 import gdcm
 import numpy
 import vtk
-import matplotlib.pyplot as plt
-#import cv2
-#import SimpleITK as sitk
-from scipy import ndimage
-from scipy.signal import argrelextrema
-from skimage import data
 from skimage.filters import threshold_multiotsu
 
-import dicom2nifti.convert_dir as convert_directory
 import nibabel as nib
-from scipy.ndimage import label
-MinConnectedVoxel = 5000
 
-class ProgressWatcher(gdcm.SimpleSubjectWatcher):
-    def ShowProgress(self, sender, event):
-        pe = gdcm.ProgressEvent.Cast(event)
-        #print(pe.GetProgress())
-
-    def EndFilter(self):
-        pass  # print ("Yay ! I am done")
-
-def get_gdcm_to_numpy_typemap():
-    """Returns the GDCM Pixel Format to numpy array type mapping."""
-    _gdcm_np = {gdcm.PixelFormat.UINT8: numpy.uint8,
-                gdcm.PixelFormat.INT8: numpy.int8,
-                # gdcm.PixelFormat.UINT12 :numpy.uint12,
-                # gdcm.PixelFormat.INT12  :numpy.int12,
-                gdcm.PixelFormat.UINT16: numpy.uint16,
-                gdcm.PixelFormat.INT16: numpy.int16,
-                gdcm.PixelFormat.UINT32: numpy.uint32,
-                gdcm.PixelFormat.INT32: numpy.int32,
-                # gdcm.PixelFormat.FLOAT16:numpy.float16,
-                gdcm.PixelFormat.FLOAT32: numpy.float32,
-                gdcm.PixelFormat.FLOAT64: numpy.float64}
-    return _gdcm_np
+# GDCM PixelFormat → numpy dtype
+_GDCM_NP_TYPES = {
+    gdcm.PixelFormat.UINT8:   numpy.uint8,
+    gdcm.PixelFormat.INT8:    numpy.int8,
+    gdcm.PixelFormat.UINT16:  numpy.uint16,
+    gdcm.PixelFormat.INT16:   numpy.int16,
+    gdcm.PixelFormat.UINT32:  numpy.uint32,
+    gdcm.PixelFormat.INT32:   numpy.int32,
+    gdcm.PixelFormat.FLOAT32: numpy.float32,
+    gdcm.PixelFormat.FLOAT64: numpy.float64,
+}
 
 
-def get_numpy_array_type(gdcm_pixel_format):
-    """Returns a numpy array typecode given a GDCM Pixel Format."""
-    return get_gdcm_to_numpy_typemap()[gdcm_pixel_format]
+def _gdcm_dtype(gdcm_pixel_format):
+    return _GDCM_NP_TYPES[gdcm_pixel_format.GetScalarType()]
 
 
 def gdcm_to_numpy(image):
-    """Converts a GDCM image to a numpy array.
-    """
     pf = image.GetPixelFormat()
-
-    assert pf.GetScalarType() in get_gdcm_to_numpy_typemap().keys(), "Unsupported array type %s" % pf
-    assert pf.GetSamplesPerPixel() == 1, "SamplesPerPixel is not 1" % pf.GetSamplesPerPixel()
-    shape = image.GetDimension(0) * image.GetDimension(1)
-    if image.GetNumberOfDimensions() == 3:
-        shape = shape * image.GetDimension(2)
-
-    dtype = get_numpy_array_type(pf.GetScalarType())
-    gdcm_array = image.GetBuffer().encode("utf-8", errors="surrogateescape")
-    volume = numpy.frombuffer(gdcm_array, dtype=dtype)
-
+    assert pf.GetScalarType() in _GDCM_NP_TYPES, "Unsupported pixel format %s" % pf
+    assert pf.GetSamplesPerPixel() == 1, "SamplesPerPixel != 1"
+    dtype = _gdcm_dtype(pf)
+    raw = image.GetBuffer().encode("utf-8", errors="surrogateescape")
+    volume = numpy.frombuffer(raw, dtype=dtype)
     if image.GetNumberOfDimensions() == 2:
-        result = volume.reshape(image.GetDimension(0), image.GetDimension(1))
-    elif image.GetNumberOfDimensions() == 3:
-        result = volume.reshape(image.GetDimension(2), image.GetDimension(0), image.GetDimension(1))
+        return volume.reshape(image.GetDimension(0), image.GetDimension(1))
+    return volume.reshape(image.GetDimension(2), image.GetDimension(0), image.GetDimension(1))
 
-    #    result.shape = shape
-    return result
 
-def toList(a):
-	s = str(a)
-	numbers = s.split('\\')
-	float_numbers = [float(num) for num in numbers]
-	return float_numbers
+def _parse_ds_values(gdcm_value):
+    return [float(n) for n in str(gdcm_value).split('\\')]
 
-def getKey(item):
-    return item[2]
 
 def GetSpacingDirOrigin(ds):
-    sSFG = gdcm.Tag(0x5200, 0x9229) # Shared Functional Group 
-    sPFFG = gdcm.Tag(0x5200,0x9230) # Per frame Functional Group
-    if ds.FindDataElement( sSFG ):		
-        sis = ds.GetDataElement( sSFG )
-        sqsis = sis.GetValueAsSQ()
-        if sqsis.GetNumberOfItems():
-            item1 = sqsis.GetItem(1)
-            nestedds = item1.GetNestedDataSet()
-            sPOS = gdcm.Tag(0x0020,0x9116) # Plane Orientation Sequence
-            sPMS = gdcm.Tag(0x0028,0x9110) # Pixel Measure Sequence
-            if nestedds.FindDataElement( sPOS ):
-                prcs = nestedds.GetDataElement( sPOS )
-                sqprcs = prcs.GetValueAsSQ()
-                if sqprcs.GetNumberOfItems():
-                    item2 = sqprcs.GetItem(1)
-                    nestedds2 = item2.GetNestedDataSet()
-                    sIOP = gdcm.Tag(0x0020,0x0037) #Image Orientation Patient
-                    if nestedds2.FindDataElement( sIOP ):
-                        cm = nestedds2.GetDataElement( sIOP )
-                        imageOrientation = toList(cm.GetValue())
-                        bIO = True
-                        print("Image Orientation",imageOrientation)
+    TAG_SHARED_FG  = gdcm.Tag(0x5200, 0x9229)
+    TAG_PER_FRAME  = gdcm.Tag(0x5200, 0x9230)
+    TAG_PLANE_ORI  = gdcm.Tag(0x0020, 0x9116)
+    TAG_PIXEL_MEAS = gdcm.Tag(0x0028, 0x9110)
+    TAG_IOP        = gdcm.Tag(0x0020, 0x0037)
+    TAG_PIX_SPACE  = gdcm.Tag(0x0028, 0x0030)
+    TAG_SLICE_THCK = gdcm.Tag(0x0018, 0x0050)
+    TAG_PLANE_POS  = gdcm.Tag(0x0020, 0x9113)
+    TAG_IMG_POS    = gdcm.Tag(0x0020, 0x0032)
+
+    imageOrientation = None
+    pixelSpacing = None
+    sliceThickness = None
+    pos0 = pos1 = None
+
+    if ds.FindDataElement(TAG_SHARED_FG):
+        sq = ds.GetDataElement(TAG_SHARED_FG).GetValueAsSQ()
+        if sq.GetNumberOfItems():
+            nested = sq.GetItem(1).GetNestedDataSet()
+
+            if nested.FindDataElement(TAG_PLANE_ORI):
+                sq2 = nested.GetDataElement(TAG_PLANE_ORI).GetValueAsSQ()
+                if sq2.GetNumberOfItems():
+                    n2 = sq2.GetItem(1).GetNestedDataSet()
+                    if n2.FindDataElement(TAG_IOP):
+                        imageOrientation = _parse_ds_values(n2.GetDataElement(TAG_IOP).GetValue())
+                        print("Image Orientation", imageOrientation)
                     else:
-                        bIO = False
-                        print("No Image Orientation")        
-            if nestedds.FindDataElement( sPMS ):
-                prcs = nestedds.GetDataElement( sPMS )
-                sqprcs = prcs.GetValueAsSQ()
-                if sqprcs.GetNumberOfItems():
-                    item2 = sqprcs.GetItem(1)
-                    nestedds2 = item2.GetNestedDataSet()
-                    sPS = gdcm.Tag(0x0028,0x0030) #Pixel Spacing
-                    if nestedds2.FindDataElement( sPS ):
-                        cm = nestedds2.GetDataElement( sPS )
-                        pixelSpacing = toList(cm.GetValue())
-                        bPS = True
-                        print("PixelSpacing",pixelSpacing)
+                        print("No Image Orientation")
+
+            if nested.FindDataElement(TAG_PIXEL_MEAS):
+                sq2 = nested.GetDataElement(TAG_PIXEL_MEAS).GetValueAsSQ()
+                if sq2.GetNumberOfItems():
+                    n2 = sq2.GetItem(1).GetNestedDataSet()
+                    if n2.FindDataElement(TAG_PIX_SPACE):
+                        pixelSpacing = _parse_ds_values(n2.GetDataElement(TAG_PIX_SPACE).GetValue())
+                        print("PixelSpacing", pixelSpacing)
                     else:
-                        bPS = False
                         print("No Pixel Spacing")
-                    sST = gdcm.Tag(0x0018,0x0050) # SLice Thickness
-                    if nestedds2.FindDataElement( sST ):
-                        cm = nestedds2.GetDataElement( sST )
-                        sliceThickness = toList(cm.GetValue())
-                        bST = True
-                        print("SliceThickness",sliceThickness)
+                    if n2.FindDataElement(TAG_SLICE_THCK):
+                        sliceThickness = _parse_ds_values(n2.GetDataElement(TAG_SLICE_THCK).GetValue())
+                        print("SliceThickness", sliceThickness)
                     else:
-                        bST = False
                         print("No Slice Thickness")
 
-    if ds.FindDataElement( sPFFG ):
-        sis = ds.GetDataElement( sPFFG )
-        sqsis = sis.GetValueAsSQ()
-        nFrame = sqsis.GetNumberOfItems()
+    if ds.FindDataElement(TAG_PER_FRAME):
+        sq = ds.GetDataElement(TAG_PER_FRAME).GetValueAsSQ()
+        nFrame = sq.GetNumberOfItems()
 
-        item = sqsis.GetItem(1)
-        nestedds = item.GetNestedDataSet()
-        sPPS = gdcm.Tag(0x0020,0x9113) # Plane Position Sequence
-        if nestedds.FindDataElement( sPPS ):
-            prcs = nestedds.GetDataElement( sPPS )
-            sqprcs = prcs.GetValueAsSQ()
-            if sqprcs.GetNumberOfItems():
-                item2 = sqprcs.GetItem(1)
-                nestedds2 = item2.GetNestedDataSet()
-                sIP = gdcm.Tag(0x0020,0x0032)
-                if nestedds2.FindDataElement( sIP ):
-                    cm = nestedds2.GetDataElement( sIP )
-                    pos0 = toList(cm.GetValue())
-                    print("ImagePosition",pos0)
-                else:
-                    print(i,"No Image Position")
+        def _read_pos(frame_item):
+            nested = frame_item.GetNestedDataSet()
+            if not nested.FindDataElement(TAG_PLANE_POS):
+                return None
+            sq2 = nested.GetDataElement(TAG_PLANE_POS).GetValueAsSQ()
+            if not sq2.GetNumberOfItems():
+                return None
+            n2 = sq2.GetItem(1).GetNestedDataSet()
+            if not n2.FindDataElement(TAG_IMG_POS):
+                return None
+            return _parse_ds_values(n2.GetDataElement(TAG_IMG_POS).GetValue())
 
-        item = sqsis.GetItem(nFrame)
-        nestedds = item.GetNestedDataSet()
-        sPPS = gdcm.Tag(0x0020,0x9113) # Plane Position Sequence
-        if nestedds.FindDataElement( sPPS ):
-            prcs = nestedds.GetDataElement( sPPS )
-            sqprcs = prcs.GetValueAsSQ()
-            if sqprcs.GetNumberOfItems():
-                item2 = sqprcs.GetItem(1)
-                nestedds2 = item2.GetNestedDataSet()
-                sIP = gdcm.Tag(0x0020,0x0032)
-                if nestedds2.FindDataElement( sIP ):
-                    cm = nestedds2.GetDataElement( sIP )
-                    bOri = True
-                    pos1 = toList(cm.GetValue())
-                    print("ImagePosition",pos1)
-                else:
-                    print("No Image Position")
-                    bOri = False
-    if (bIO and bOri):
-        cosineX = numpy.array(imageOrientation[0:3])
-        cosineY = numpy.array(imageOrientation[3:6])
-        normal = numpy.cross(cosineX, cosineY)
-        posV0 = numpy.array(pos0)
-        posV1 = numpy.array(pos1)
-        dist = (numpy.dot(normal,posV1)-numpy.dot(normal,posV0))/(nFrame-1)
-        if (dist<0):
-            bFlip = True
-            origin = pos1
-        else:
-            bFlip = False
-            origin= pos0
-        return imageOrientation,sliceThickness,origin,pixelSpacing,abs(dist),bFlip,pos0,pos1    
-    else:
+        pos0 = _read_pos(sq.GetItem(1))
+        pos1 = _read_pos(sq.GetItem(nFrame))
+        if pos0:
+            print("ImagePosition", pos0)
+        if pos1:
+            print("ImagePosition", pos1)
+
+    if imageOrientation is None or pos0 is None or pos1 is None:
         return -1
 
-def GetZSpacing(dataset, tag, directionCosines):
-    if (not dataset.FindDataElement(tag)):
-        return -1
-    sqi = dataset.GetDataElement(tag).GetValueAsSQ()
-    nItems = sqi.GetNumberOfItems()
-    if (not sqi or nItems == 0):
-        return -2
-    cosineX = numpy.array(directionCosines[0:3])
-    cosineY = numpy.array(directionCosines[3:6])
+    cosineX = numpy.array(imageOrientation[0:3])
+    cosineY = numpy.array(imageOrientation[3:6])
     normal = numpy.cross(cosineX, cosineY)
-    dist = numpy.zeros(nItems)
-
-    for i in range(nItems):
-        # print(i+1, "th item: in ", nItems, ":")
-        item = sqi.GetItem(i + 1)
-        subds = item.GetNestedDataSet()
-
-        # Plane Position Sequence
-        tpms = gdcm.Tag(0x0020, 0x9113)
-        if (not subds.FindDataElement(tpms)):
-            return -3
-
-        sqi2 = subds.GetDataElement(tpms).GetValueAsSQ()
-        if (not sqi2 or sqi2.GetNumberOfItems() == 0):
-            return -4
-
-        item2 = sqi2.GetItem(1)
-        subds2 = item2.GetNestedDataSet()
-
-        tps = gdcm.Tag(0x0020, 0x0032)
-        if (not subds2.FindDataElement(tps)):
-            print("Not exist 0020,0032")
-
-        de2 = subds2.GetDataElement(tps)
-        posV = toList(str(de2.GetValue()))
-        pos = numpy.array(posV)
-        dist[i] = numpy.dot(normal, pos)
-
-    prev = dist[0]
-    sum = 0
-    for i in range(nItems - 1):
-        sum = sum + (dist[i + 1] - prev)
-        prev = dist[i + 1]
-
-    return sum / (nItems - 1)
+    dist = (numpy.dot(normal, pos1) - numpy.dot(normal, pos0)) / (nFrame - 1)
+    bFlip = dist < 0
+    origin = pos1 if bFlip else pos0
+    return imageOrientation, sliceThickness, origin, pixelSpacing, abs(dist), bFlip, pos0, pos1
 
 
-def numpy2VTK(img, spacing=[1.0, 1.0, 1.0], origin=[0.0,0.0,0.0],dirCosines=[1.0,0.0,0.0,0.0,1.0,0.0]):
-    # evolved from code from Stou S.,
-    # on http://www.siafoo.net/snippet/314
-    # This function, as the name suggests, converts numpy array to VTK
-    # Check origin, direction, spacing
-
+def numpy2VTK(img, spacing=[1.0, 1.0, 1.0], origin=[0.0, 0.0, 0.0],
+              dirCosines=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]):
     importer = vtk.vtkImageImport()
-
     img_data = img.astype('int16')
-    img_string = img_data.tobytes()  # type short
+    img_string = img_data.tobytes()
     dim = img.shape
-
-    # vtkData = numpy_support.numpy_to_vtk(num_array=img_data.ravel(), deep=True, array_type=vtk.VTK_UNSIGNED_INT)
-
     print(len(img_string), dim)
-    # for i in range(100):
-    #    prStr = ""
-    #    for j in range(100):
-    #       prStr += ' ' + str(img_string[(100+i)*375*375 + (100+j)*375 + 100])
-    #    print(prStr)
 
-    importer.CopyImportVoidPointer(img_string, len(img_string))  # (dim[0]*dim[1]*dim[2])
+    importer.CopyImportVoidPointer(img_string, len(img_string))
     importer.SetDataScalarType(vtk.VTK_SHORT)
     importer.SetNumberOfScalarComponents(1)
 
-    extent = importer.GetDataExtent()
-    importer.SetDataExtent(extent[0], extent[0] + dim[2] - 1,
-                           extent[2], extent[2] + dim[1] - 1,
-                           extent[4], extent[4] + dim[0] - 1)
-    importer.SetWholeExtent(extent[0], extent[0] + dim[2] - 1,
-                            extent[2], extent[2] + dim[1] - 1,
-                            extent[4], extent[4] + dim[0] - 1)
+    ext = importer.GetDataExtent()
+    importer.SetDataExtent(ext[0], ext[0] + dim[2] - 1,
+                           ext[2], ext[2] + dim[1] - 1,
+                           ext[4], ext[4] + dim[0] - 1)
+    importer.SetWholeExtent(ext[0], ext[0] + dim[2] - 1,
+                            ext[2], ext[2] + dim[1] - 1,
+                            ext[4], ext[4] + dim[0] - 1)
+    importer.SetDataSpacing(*spacing)
+    importer.SetDataOrigin(*origin)
 
-    importer.SetDataSpacing(spacing[0], spacing[1], spacing[2])
-    importer.SetDataOrigin(origin[0],origin[1],origin[2])
     cosX = numpy.array(dirCosines[0:3])
     cosY = numpy.array(dirCosines[3:6])
     cosZ = numpy.cross(cosX, cosY)
-    R=numpy.transpose([cosX,cosY,cosZ])
-    importer.SetDataDirection(R.flatten()) 
-
+    R = numpy.transpose([cosX, cosY, cosZ])
+    importer.SetDataDirection(R.flatten())
     return importer
 
 
-def show_mid_slice(img_numpy, title='img'):
-   """
-   Accepts an 3D numpy array and shows median slices in all three planes
-   """
-   assert img_numpy.ndim == 3
-   n_i, n_j, n_k = img_numpy.shape
+def load_dicom(directory, blendType=3, makenifti=False):
+    TAG_PATIENT_ID   = gdcm.Tag(0x0010, 0x0020)
+    TAG_PATIENT_NAME = gdcm.Tag(0x0010, 0x0010)
+    TAG_STUDY_ID     = gdcm.Tag(0x0020, 0x0010)
+    TAG_STUDY_UID    = gdcm.Tag(0x0020, 0x000d)
+    TAG_SERIES_UID   = gdcm.Tag(0x0020, 0x000e)
+    TAG_SERIES_NUM   = gdcm.Tag(0x0020, 0x0011)
+    TAG_NUM_FRAMES   = gdcm.Tag(0x0028, 0x0008)
+    TAG_IMG_POS      = gdcm.Tag(0x0020, 0x0032)
+    TAG_PIX_SPACE    = gdcm.Tag(0x0028, 0x0030)
+    TAG_IOP          = gdcm.Tag(0x0020, 0x0037)
+    TAG_SAMPLES_PX   = gdcm.Tag(0x0028, 0x0002)
+    TAG_PHOTOMETRIC  = gdcm.Tag(0x0028, 0x0004)
+    TAG_ROWS         = gdcm.Tag(0x0028, 0x0010)
+    TAG_COLS         = gdcm.Tag(0x0028, 0x0011)
+    TAG_BIT_STORED   = gdcm.Tag(0x0028, 0x0101)
+    TAG_MEDIA_SOP    = gdcm.Tag(0x0002, 0x0002)
+    TAG_MEDIA_INST   = gdcm.Tag(0x0002, 0x0003)
+    TAG_XFER_SYNTAX  = gdcm.Tag(0x0002, 0x0010)
+    TAG_SOP_CLASS    = gdcm.Tag(0x0008, 0x0016)
+    TAG_SOP_INST     = gdcm.Tag(0x0008, 0x0018)
+    TAG_SHARED_FG    = gdcm.Tag(0x5200, 0x9229)
+    TAG_PER_FRAME    = gdcm.Tag(0x5200, 0x9230)
+    TAG_WIN_CENTER   = gdcm.Tag(0x0028, 0x1050)
+    TAG_WIN_WIDTH    = gdcm.Tag(0x0028, 0x1051)
+    TAG_RESCALE_INT  = gdcm.Tag(0x0028, 0x1052)
+    TAG_RESCALE_SLP  = gdcm.Tag(0x0028, 0x1053)
+    TAG_RESCALE_TYPE = gdcm.Tag(0x0028, 0x1054)
 
-   # sagittal (left image)
-   center_i1 = int((n_i - 1) / 2)
-   # coronal (center image)
-   center_j1 = int((n_j - 1) / 2)
-   # axial slice (right image)
-   center_k1 = int((n_k - 1) / 2)
+    t0 = time.time()
 
-   show_slices([img_numpy[center_i1, :, :],
-                img_numpy[:, center_j1, :],
-                img_numpy[:, :, center_k1]])
-   plt.suptitle(title)
-
-def show_slices(slices):
-   """
-   Function to display a row of image slices
-   Input is a list of numpy 2D image slices
-   """
-   fig, axes = plt.subplots(1, len(slices))
-   for i, slice in enumerate(slices):
-       axes[i].imshow(slice, cmap="gray", origin="lower")
-   plt.show()
-
-def find_connected_elements_3d(m, v):
-    # Create a binary mask where elements equal to v are True, others are False
-    mask = (m == v)    
-    # Use scipy's label function to identify connected components
-    labeled_array, num_features = label(mask)
-    # Get the indices for each labeled region
-    indices = [numpy.argwhere(labeled_array == i) for i in range(1, num_features + 1)]
-    return indices
-def load_dicom(directory,blendType=3,makenifti=False):
-
-    # Define the set of tags we are interested in, may need more
-    t1 = gdcm.Tag(0x10, 0x20);  # Patient ID
-    t2 = gdcm.Tag(0x10, 0x10);  # Patient Name
-    t3 = gdcm.Tag(0x20, 0x10);  # Study ID
-    t4 = gdcm.Tag(0x20, 0x0d);  # Study Instance UID
-    t5 = gdcm.Tag(0x20, 0x0e);  # Series Instance UID
-    t6 = gdcm.Tag(0x20, 0x11);  # Series Number
-    t7 = gdcm.Tag(0x28, 0x08);  # Number of Frames
-    t8 = gdcm.Tag(0x20, 0x32);  # Image Position
-    t10 = gdcm.Tag(0x28, 0x30);  # Pixel Spacing
-    t11 = gdcm.Tag(0x20, 0x37);  # Image Orientation Patient
-    t12 = gdcm.Tag(0x28, 0x02);  # Samples per pixel
-    t13 = gdcm.Tag(0x28, 0x04);  # Photometric Interpretation
-    t14 = gdcm.Tag(0x28, 0x10);  # Rows
-    t15 = gdcm.Tag(0x28, 0x11);  # Column
-    t16 = gdcm.Tag(0x28, 0x101);  # BitStored
-    t17 = gdcm.Tag(0x02, 0x02);  # Media Storage SOP Class UID
-    t18 = gdcm.Tag(0x02, 0x03);  # Media Storage SOP Instance UID
-    t19 = gdcm.Tag(0x02, 0x10);  # Transfer Syntax
-    t20 = gdcm.Tag(0x08, 0x16);  # SOP Class UID
-    t21 = gdcm.Tag(0x08, 0x18);  # SOP Instance UID
-    t22 = gdcm.Tag(0x5200, 0x9229);  # Shared functional group
-    t23 = gdcm.Tag(0x5200, 0x9230);  # Per frame functional group
-    t24 = gdcm.Tag(0x0028, 0x1050);  # WindowCenter
-    t25 = gdcm.Tag(0x0028, 0x1051);  # WindowWidth
-    t26 = gdcm.Tag(0x0028, 0x1052);  # Rescale Intercept
-    t27 = gdcm.Tag(0x0028, 0x1053);  # Rescale Slope
-    t28 = gdcm.Tag(0x0028, 0x1054);  # Rescale Type
-
-    # for profiling
-    currentTime = time.time()
-
-    # Iterate over directory
-    d = gdcm.Directory();
-    nfiles = d.Load(directory);
-    if (nfiles == 0): return None
-
+    d = gdcm.Directory()
+    if d.Load(directory) == 0:
+        return None
     filenames = d.GetFilenames()
-    # print("Files ", filenames)
 
-    #  Get rid of any Warning while parsing the DICOM files
     gdcm.Trace.WarningOff()
 
-    # instanciate Scanner:
-    sp = gdcm.Scanner.New();
+    sp = gdcm.Scanner.New()
     s = sp.__ref__()
-    # w = ProgressWatcher(s, 'Watcher')
+    for tag in (TAG_PATIENT_ID, TAG_PATIENT_NAME, TAG_STUDY_ID, TAG_STUDY_UID,
+                TAG_SERIES_UID, TAG_SERIES_NUM, TAG_NUM_FRAMES, TAG_IMG_POS,
+                TAG_PIX_SPACE, TAG_IOP, TAG_SAMPLES_PX, TAG_PHOTOMETRIC,
+                TAG_ROWS, TAG_COLS, TAG_BIT_STORED, TAG_MEDIA_SOP,
+                TAG_MEDIA_INST, TAG_XFER_SYNTAX, TAG_SOP_CLASS, TAG_SOP_INST,
+                TAG_SHARED_FG, TAG_PER_FRAME):
+        s.AddTag(tag)
 
-    s.AddTag(t1);
-    s.AddTag(t2);
-    s.AddTag(t3);
-    s.AddTag(t4);
-    s.AddTag(t5);
-    s.AddTag(t6);
-    s.AddTag(t7);
-    s.AddTag(t8);
-    s.AddTag(t10);
-    s.AddTag(t11);
-    s.AddTag(t12);
-    s.AddTag(t13);
-    s.AddTag(t14);
-    s.AddTag(t15);
-    s.AddTag(t16);
-    s.AddTag(t17);
-    s.AddTag(t18);
-    s.AddTag(t19);
-    s.AddTag(t20);
-    s.AddTag(t21);
-    s.AddTag(t22);
-    s.AddTag(t23);
+    if not s.Scan(filenames):
+        sys.exit(1)
+    print("success True")
+    print("Time to Scan Directory and Dicom files", time.time() - t0)
 
-    b = s.Scan(filenames);
-    if (not b): sys.exit(1);
-    print("success", b);
-
-    # for profiling
-    print("Time to Scan Directory and Dicom files", time.time() - currentTime)
-    currentTime = time.time()
-
-    dicomfiles = []
-    patient_list = []
-    study_list = []
     series_list = []
-
     for dFile in filenames:
-        if (s.IsKey(dFile)):  # existing DICOM file
+        if s.IsKey(dFile):
+            val = s.GetValue(dFile, TAG_SERIES_UID)
+            if val and val not in series_list:
+                series_list.append(val)
 
-            #print(dFile)
-            is_multiframe = 0
+    if len(series_list) != 1:
+        return None
 
-            pttv = gdcm.PythonTagToValue(s.GetMapping(dFile))
-            pttv.Start()
-            # iterate until the end:
-            while (not pttv.IsAtEnd()):
-                # get current value for tag and associated value:
-                # if tag was not found, then it was simply not added to the internal std::map
-                # Warning value can be None
-                tag = pttv.GetCurrentTag()
-                value = pttv.GetCurrentValue()
+    series_uid = series_list[0]
+    series_imgfiles = s.GetAllFilenamesFromTagToValue(TAG_SERIES_UID, series_uid)
+    print("-" * 71)
+    print(series_uid, ", # of Files: ", len(series_imgfiles))
 
-                if (tag == t1):
-                    # print ("PatientID->",value)
-                    if (value not in patient_list): patient_list.append(value)
-                    patient_id = value
-                elif (tag == t2):
-                    # print ("PatientName->",value)
-                    pass
-                elif (tag == t3):
-                    # print ("StudyID->",value)
-                    pass
-                elif (tag == t4):
-                    # print ("StudyInstanceUID->",value)
-                    if (value not in study_list): study_list.append(value)
-                    study_id = value
-                elif (tag == t6):
-                    # print ("SeriesNum->",value)
-                    pass
-                elif (tag == t5):
-                    # print ("SeriesInstanceUID->",value)
-                    if (value not in series_list): series_list.append(value)
-                    series_id = value
-                elif (tag == t7):
-                    # print ("NumberOfFrame->",value)
-                    if (int(value) > 1):
-                        is_multiframe = int(value)
-                    else:
-                        is_multiframe = 0
-                elif (tag == t8):
-                    #print("Image Patient Position->",value)
-                    pass
-                elif (tag == t19):
-                    # print("Transfer Syntax->",value)
-                    pass
-                elif (tag == t20):
-                    # print("SOP Class UID->",value)
-                    pass
-                elif (tag == t21):
-                    # print("SOP Instance UID->",value)
-                    instance_id = value
-                    pass
-                elif (tag == t22):
-                    #print("Shared Functional Group Sequence->",value)
-                    pass
-                # increment iterator
-                pttv.Next()
+    # --- single-file (possibly multiframe) ---
+    if len(series_imgfiles) == 1:
+        image_file = series_imgfiles[0]
+        nFrame = int(s.GetValue(image_file, TAG_NUM_FRAMES))
 
-                # dicomfiles.append('PatientID':patient_id,'StudyID':study_id, 'SeriesID':seriesID, 'Multiframe':is_multiframe)
-            if (not study_id): print("Missing StudyUID ")
-            if (not series_id): print("Missing SeriesUID")
+        if nFrame <= 1:
+            print("Single image file with unique series id", image_file, nFrame)
+            return None
 
-            dicomfiles.append(
-                {'PatientID': patient_id, 'StudyID': study_id, 'SeriesID': series_id, 'Multiframe': is_multiframe,
-                 'InstanceUID': instance_id, 'FileName': dFile})
-            
-    if (len(series_list)>1 and len(series_list)==0): 
-        return None # many series or no series
-    else:     
-        series_uid = series_list[0]
+        print("Read Multiframe", image_file, nFrame)
+        reader = gdcm.ImageReader()
+        reader.SetFileName(image_file)
+        if not reader.Read():
+            print("Cannot read image", image_file)
+            return None
 
-        series_imgfiles = s.GetAllFilenamesFromTagToValue(t5, series_uid)
-        print("-----------------------------------------------------------------------")
-        print(series_uid, ", # of Files: ", len(series_imgfiles))
+        image = reader.GetImage()
+        npVolume = gdcm_to_numpy(image).copy()
+        print("Shape of Volume:", npVolume.shape)
 
-        if (len(series_imgfiles) == 1):  # Single file series-> multiframe, or just single image
-            # check multiframe
-            image_file = series_imgfiles[0]
-            nFrame = int(s.GetValue(image_file, t7))
+        w, d, h = image.GetDimension(0), image.GetDimension(1), image.GetDimension(2)
+        result = GetSpacingDirOrigin(reader.GetFile().GetDataSet())
+        if result == -1:
+            return None
+        dirCosines, sliceThickness, origin, pixelSpacing, dz, bFlip, pos0, pos1 = result
+        print(dirCosines, sliceThickness, origin, pixelSpacing, dz, bFlip)
 
-            # check scout image
+        dx, dy = pixelSpacing[0], pixelSpacing[1]
+        if bFlip:
+            npVolume = numpy.flip(npVolume, 0)
 
-            if (nFrame > 1): # Multiframe Image
-                print("Read Multiframe", image_file, nFrame)
+        is_multiframe = nFrame
 
-                reader = gdcm.ImageReader()
-                reader.SetFileName(image_file)
-                if (not reader.Read()):
-                    print("Cannot read image", image_file)
-                    return None
-                else:
-                    image = reader.GetImage()
-                    npVolume = gdcm_to_numpy(image).copy()
-                    print("Shape of Volume:", npVolume.shape)
+        print("Samples per Pixel:",        s.GetValue(image_file, TAG_SAMPLES_PX))
+        print("Photometric Representation:", s.GetValue(image_file, TAG_PHOTOMETRIC))
+        print("Rows:", s.GetValue(image_file, TAG_ROWS))
+        print("Columns:", s.GetValue(image_file, TAG_COLS))
+        print("BitStored:", s.GetValue(image_file, TAG_BIT_STORED))
 
-                    # Image Dimension
-                    w, d, h = image.GetDimension(0), image.GetDimension(1), image.GetDimension(2)
+        iRescaleSlope, iRescaleIntercept = 1.0, -1024.0
+        iWindowCenter, iWindowWidth = 1024, 4092
 
-                    # Get DirectionCosines, Origin, Spacing
-                    f = reader.GetFile()
-                    ds = f.GetDataSet()
-                    
-                    dirCosines, sliceThickness, origin, pixelSpacing, dz, bFlip,pos0,pos1 = GetSpacingDirOrigin(ds)
-                    print(dirCosines, sliceThickness, origin, pixelSpacing, dz, bFlip) 
-                    dx = pixelSpacing[0]
-                    dy = pixelSpacing[1]
-                    if (bFlip):
-                        npVolume = numpy.flip(npVolume,0)
-                    max_npV = npVolume.max()
-                    min_npV = npVolume.min()
+        s_slp = s.GetValue(image_file, TAG_RESCALE_SLP)
+        s_int = s.GetValue(image_file, TAG_RESCALE_INT)
+        s_wc  = s.GetValue(image_file, TAG_WIN_CENTER)
+        s_ww  = s.GetValue(image_file, TAG_WIN_WIDTH)
+        print("RescaleSlope:", s_slp, "RescaleIntercept:", s_int)
+        print("WindowCenter:", s_wc, "WindowWidth:", s_ww)
 
-                    print("Samples per Pixel:", s.GetValue(image_file, t12))
-                    print("Photometric Representation:", s.GetValue(image_file, t13))
-                    print("Rows:", s.GetValue(image_file, t14))
-                    print("Columns:", s.GetValue(image_file, t15))
-                    print("BitStored:", s.GetValue(image_file, t16))
+        if s_wc: iWindowCenter = s_wc
+        if s_ww: iWindowWidth = s_ww
+        if s_int: iRescaleIntercept = s_int
+        if s_slp: iRescaleSlope = s_slp
 
-                    # f = reader.GetFile()
-                    # ds = f.GetDataSet()
-                    # print(GetZSpacing(ds, t23, cosines))
+    # --- multi-file series ---
+    else:
+        is_multiframe = 0
 
-                    # CT default value
-                    iRescaleSlope = 1.0
-                    iRescaleIntercept = -1024.0
-                    iWindowCenter = 1024
-                    iWindowWidth = 4092
+        series_files = []
+        for f in series_imgfiles:
+            posV = _parse_ds_values(s.GetValue(f, TAG_IMG_POS))
+            series_files.append([f, posV])
 
-                    print("RescaleSlope:", s.GetValue(image_file, t27))
-                    print("RescaleIntercept:", s.GetValue(image_file, t26))
-                    #print("RescaleType:", s.GetValue(image_file, t28))
-                    print("WindowCenter:", s.GetValue(image_file, t24))
-                    print("WindowWidth:", s.GetValue(image_file, t25))
+        origin = series_files[0][1]
+        pixelSpacing = _parse_ds_values(s.GetValue(series_files[0][0], TAG_PIX_SPACE))
+        dirCosines   = _parse_ds_values(s.GetValue(series_files[0][0], TAG_IOP))
+        rowCosine    = numpy.array(dirCosines[:3])
+        colCosine    = numpy.array(dirCosines[3:])
+        sliceCosine  = numpy.cross(rowCosine, colCosine)
 
-                    s27 = s.GetValue(image_file, t27)
-                    s26 = s.GetValue(image_file, t26)
-                    # s28 = s.GetValue(image_file, t28)
-                    s24 = s.GetValue(image_file, t24)
-                    s25 = s.GetValue(image_file, t25)
+        for f in series_files:
+            f.append([numpy.dot(numpy.array(f[1]) - numpy.array(origin), sliceCosine)])
 
-                    if s24: iWindowCenter = s24
-                    if s25: iWindowWidth = s25
-                    if s26: iRescaleIntercept = s26
-                    if s27: iRescaleSlope = s27
+        sorted_series_files = sorted(series_files, key=lambda item: item[2])
 
-            else:  # nFrame == 1
-                print("Single image file with unique series id", image_file, nFrame)
-                reader = gdcm.ImageReader()
-                reader.SetFileName(image_file)
-                if (not reader.Read()):
-                    print("Cannot read image", image_file)
-                    return None
-                else:
-                    npVolume = gdcm_to_numpy(reader.GetImage())
-                    print("Shape of Volume:", npVolume.shape)
-                    return None
+        if len(sorted_series_files) > 1:
+            dists = [
+                numpy.linalg.norm(numpy.array(sorted_series_files[i][1]) -
+                                  numpy.array(sorted_series_files[i - 1][1]))
+                for i in range(1, len(sorted_series_files))
+            ]
+            avg_slice_distance = numpy.mean(dists)
+        else:
+            avg_slice_distance = None
 
-        else:  # multiple files in a series
+        dx, dy = pixelSpacing[0], pixelSpacing[1]
+        dz = avg_slice_distance
 
-            # Read Postion and sorting
-            series_files = []
-            for i in range(len(series_imgfiles)):
-                # convert ImagePosition
-                strIP = s.GetValue(series_imgfiles[i], t8)
-                posV = toList(strIP)
-                series_files.append([series_imgfiles[i], posV])
-            origin = series_files[0][1]
-            pixelSpacing = toList(s.GetValue(series_files[0][0], t10))
-            dirCosines = toList(s.GetValue(series_files[0][0], t11))
-            rowCosine = numpy.array(dirCosines[:3])
-            colCosine = numpy.array(dirCosines[3:])
-            sliceCosine = numpy.cross(rowCosine,colCosine)
+        reader = gdcm.ImageReader()
+        reader.SetFileName(sorted_series_files[0][0])
+        if not reader.Read():
+            print("Cannot read image", sorted_series_files[0][0])
 
-            for i in range(len(series_files)):
-                series_files[i].append([numpy.dot((numpy.array(series_files[i][1])-numpy.array(origin)),sliceCosine)])
+        image = reader.GetImage()
+        pf = image.GetPixelFormat()
+        assert pf.GetScalarType() in _GDCM_NP_TYPES, "Unsupported pixel format %s" % pf
+        w, d, h = image.GetDimension(0), image.GetDimension(1), len(sorted_series_files)
 
-            sorted_series_files = sorted(series_files, key=getKey, reverse=False)
-            if len(series_files)>1:
-                slice_distances = []              
-                for i in range(1,len(sorted_series_files)):
-                    distance = numpy.linalg.norm(numpy.array(sorted_series_files[i][1])-numpy.array(sorted_series_files[i-1][1]))
-                    slice_distances.append(distance)      
-                avg_slice_distance = numpy.mean(slice_distances)
-            else:
-                avg_slice_distance = None
+        dtype = _gdcm_dtype(pf)
+        npVolume = numpy.zeros((h, w, d), dtype=dtype)
+        print(w, d, h, dtype, dx, dy, dz)
 
-            dx = pixelSpacing[0]
-            dy = pixelSpacing[1]            
-            dz = avg_slice_distance
-
+        for i in range(h):
             reader = gdcm.ImageReader()
-            reader.SetFileName(sorted_series_files[0][0])
-            if (not reader.Read()):
-                print("Cannot read image", sorted_series_files[0][0])
-
+            reader.SetFileName(sorted_series_files[i][0])
+            if not reader.Read():
+                print("Cannot read image", sorted_series_files[i][0])
             image = reader.GetImage()
-            pf = image.GetPixelFormat()
-            assert pf.GetScalarType() in get_gdcm_to_numpy_typemap().keys(), "Unsupported array type %s" % pf
-            #assert pf.GetSamplesPerPixel() == 1, "Support only one samples"
-            w, d, h = image.GetDimension(0), image.GetDimension(1), len(sorted_series_files)
+            raw = image.GetBuffer().encode("utf-8", errors="surrogateescape")
+            npVolume[i, :, :] = numpy.frombuffer(raw, dtype=dtype).reshape(w, d).copy()
 
-            spacing = image.GetSpacing()
+        first = sorted_series_files[0][0]
+        print("Pixel Spacing:", pixelSpacing, avg_slice_distance)
+        print("Image Orientation:", dirCosines)
+        print("Origin:", origin)
+        print("Samples per Pixel:",        s.GetValue(first, TAG_SAMPLES_PX))
+        print("Photometric Representation:", s.GetValue(first, TAG_PHOTOMETRIC))
+        print("Rows:", s.GetValue(first, TAG_ROWS))
+        print("Columns:", s.GetValue(first, TAG_COLS))
+        print("BitStored:", s.GetValue(first, TAG_BIT_STORED))
 
-            dtype = get_numpy_array_type(pf.GetScalarType())
-            npVolume = numpy.zeros((h, w, d), dtype=dtype)
-            print(w, d, h, dtype, dx, dy, dz)
+        max_npV = npVolume.max()
+        min_npV = npVolume.min()
 
-            for i in range(h):
-                reader = gdcm.ImageReader()
-                reader.SetFileName(sorted_series_files[i][0])
-                if (not reader.Read()):
-                    print("Cannot read image", sorted_series_files[i][0])
+        iRescaleSlope = 1
+        iRescaleIntercept = 0 if min_npV < 0 else -1024
+        iWindowCenter, iWindowWidth = 1024, 4092
 
-                image = reader.GetImage()
-                gdcm_array = image.GetBuffer().encode("utf-8", errors="surrogateescape")
-                result = numpy.frombuffer(gdcm_array, dtype=dtype)
-                npVolume[i, :, :] = result.reshape(w, d).copy() #numpy.flipud(result.reshape(d, w).copy())
+        s_slp = s.GetValue(first, TAG_RESCALE_SLP)
+        s_int = s.GetValue(first, TAG_RESCALE_INT)
+        s_wc  = s.GetValue(first, TAG_WIN_CENTER)
+        s_ww  = s.GetValue(first, TAG_WIN_WIDTH)
+        print("RescaleSlope:", s_slp, "RescaleIntercept:", s_int)
+        print("RescaleType:", s.GetValue(first, TAG_RESCALE_TYPE))
+        print("WindowCenter:", s_wc, "WindowWidth:", s_ww)
 
-            # Load images to numpy
-            # 1st file에서 image plane, pixel정보 추출
-            print("Pixel Spacing:", pixelSpacing, avg_slice_distance)
-            print("Image Orientation:", dirCosines)
-            print("Origin:",origin)
-            print("Samples per Pixel:", s.GetValue(sorted_series_files[0][0], t12))
-            print("Photometric Representation:", s.GetValue(sorted_series_files[0][0], t13))
-            print("Rows:", s.GetValue(sorted_series_files[0][0], t14))
-            print("Columns:", s.GetValue(sorted_series_files[0][0], t15))
-            print("BitStored:", s.GetValue(sorted_series_files[0][0], t16))
+        if s_wc: iWindowCenter = s_wc
+        if s_ww: iWindowWidth = s_ww
+        if s_int: iRescaleIntercept = s_int
+        if s_slp: iRescaleSlope = s_slp
 
-            max_npV = npVolume.max()
-            min_npV = npVolume.min()
+        if s_int or (max_npV - min_npV) >= 4096:
+            print("16bit data and rescale intercept", s_int, s_slp)
 
-            # default value
-            iRescaleSlope = 1
-            if (min_npV < 0):
-                iRescaleIntercept = 0
-            else:
-                iRescaleIntercept = -1024
+    # --- common post-load ---
+    direction_x = dirCosines[0:3]
+    direction_y = dirCosines[3:6]
 
-            iWindowCenter = 1024
-            iWindowWidth = 4092
+    max_npV = npVolume.max()
+    min_npV = npVolume.min()
+    print("min, max, rescaleSlope, Intercept:", min_npV, max_npV, iRescaleSlope, iRescaleIntercept)
 
-            print("RescaleSlope:", s.GetValue(sorted_series_files[0][0], t27))
-            print("RescaleIntercept:", s.GetValue(sorted_series_files[0][0], t26))
-            print("RescaleType:", s.GetValue(sorted_series_files[0][0], t28))
-            print("WindowCenter:", s.GetValue(sorted_series_files[0][0], t24))
-            print("WindowWidth:", s.GetValue(sorted_series_files[0][0], t25))
-
-            s27 = s.GetValue(sorted_series_files[0][0], t27)
-            s26 = s.GetValue(sorted_series_files[0][0], t26)
-            # s28 = s.GetValue(sorted_series_files[0][0], t28)
-            s24 = s.GetValue(sorted_series_files[0][0], t24)
-            s25 = s.GetValue(sorted_series_files[0][0], t25)
-
-            if s24: iWindowCenter = s24
-            if s25: iWindowWidth = s25
-            if s26: iRescaleIntercept = s26
-            if s27: iRescaleSlope = s27
-
-            if s26 or (max_npV-min_npV)>= 4096:
-                print("16bit data and rescale intercept", s26, s27)
-
-        direction_x = dirCosines[0:3]
-        direction_y = dirCosines[3:6]
-        direction_z = numpy.cross(direction_x,direction_y)
-        # pyplot single slice
-        x = numpy.arange(0.0, (w+1)*dx, dx)
-        y = numpy.arange(0.0, (d+1)*dy, dy)
-        z = numpy.arange(0.0, (h+1)*dz, dz)
-        # show_mid_slice(npVolume,title="CenterSlice")
-        # show_slices([npVolume[10,:,:],npVolume[70,:,:],npVolume[120,:,:]])
-
-        print("min, max, rescaleSlope, Intercept: ",npVolume.min(),npVolume.max(), iRescaleSlope, iRescaleIntercept)
-    
-        # direction = numpy.direction_x,direction_y,direction_z
-        # print([dx, dy, dz], origin, direction_x,direction_y, direction_z)
-
-    # vtk data importer
-    # For VTK to be able to use the data, it must be stored as a VTK-image. This can be done by the vtkImageImport-class which
-    # imports raw data and stores it.
-    dataImporter = vtk.vtkImageImport()
     dataImporter = numpy2VTK(npVolume, [dx, dy, dz], origin, dirCosines)
     dataImporter.Update()
 
-    # Test for Removing some outlier, [npV_min, npV_min + 0.05*(max_npV-min_npV)]->0-rescale intercept, [npV_max-0.05*(max_npV-min_npV) ,npV_max] 값을 조정 
-    npVolume[npVolume < (min_npV + 0.005*(max_npV-min_npV))] = 0
+    npVolume[npVolume < (min_npV + 0.005 * (max_npV - min_npV))] = 0
 
-    start_time = time.time()
+    t0 = time.time()
+    npVol = npVolume * (256.0 / (max_npV - min_npV))
+    thresholds = threshold_multiotsu(npVol, 4)
+    adjThresholds = [
+        t * ((max_npV - min_npV) / 256.0) * iRescaleSlope + iRescaleIntercept
+        for t in thresholds
+    ]
+    print(adjThresholds, time.time() - t0)
 
-    npVol = npVolume*(256.0/(max_npV-min_npV))
-
-    thresholds = threshold_multiotsu(npVol,4)
-    end_time = time.time()
-    adjThresholds = []
-    for i in thresholds:
-        #print(i*((max_npV-min_npV)/256.0), i*16, (i*16)*iRescaleSlope+iRescaleIntercept) 
-        # original CT value, 4096 scale, applying rescale
-        adjThresholds.append(i*((max_npV-min_npV)/256.0)*iRescaleSlope+iRescaleIntercept)
-    print(adjThresholds, end_time-start_time)
-
-    # makenifti files with directory, output_directory
     if makenifti:
-        """        parent_dir = os.path.dirname(os.path.abspath(directory))
-        output_directory = os.path.join(parent_dir,"segment")
-        os.makedirs(output_directory, exist_ok=True)
-        print(output_directory)
-        convert_directory.convert_directory(directory, output_directory)
-    else: """
-        start_time = time.time()
-
+        t0 = time.time()
         parent_dir = os.path.dirname(os.path.abspath(directory))
-        output_directory = os.path.join(parent_dir,"segment")
-        base_filename = "Dental_0001_0000"
-        nifti_file = os.path.join(output_directory, base_filename + '.nii.gz')
+        output_directory = os.path.join(parent_dir, "segment")
         os.makedirs(output_directory, exist_ok=True)
-        npImage = npVolume.transpose(2,1,0)
 
-        step = [0,0,0]
-        # TODO in case of multivolume
+        npImage = npVolume.transpose(2, 1, 0)
+
         if is_multiframe != 0:
-            for i in range(3):
-                step[i] = (pos0[i] - pos1[i])/(1-h)
+            step = [(pos0[i] - pos1[i]) / (1 - h) for i in range(3)]
         else:
-            pos0 = sorted_series_files[0][1]
-            pos1 = sorted_series_files[h-1][1]
-            for i in range(3):
-                step[i] = (pos0[i] - pos1[i])/(1-h)
+            p0 = sorted_series_files[0][1]
+            p1 = sorted_series_files[h - 1][1]
+            step = [(p0[i] - p1[i]) / (1 - h) for i in range(3)]
 
-        affine = numpy.array(
-        [[-direction_x[0] * dy, -direction_y[0] * dx, -step[0], -origin[0]],
-         [-direction_x[1] * dy, -direction_y[1] * dx, -step[1], -origin[1]],
-         [direction_x[2] * dy, direction_y[2] * dx, step[2], origin[2]],
-         [0, 0, 0, 1]])
+        affine = numpy.array([
+            [-direction_x[0] * dy, -direction_y[0] * dx, -step[0], -origin[0]],
+            [-direction_x[1] * dy, -direction_y[1] * dx, -step[1], -origin[1]],
+            [ direction_x[2] * dy,  direction_y[2] * dx,  step[2],  origin[2]],
+            [0, 0, 0, 1]
+        ])
 
         nii_image = nib.Nifti1Image(npImage, affine)
         nii_image.header.set_slope_inter(1, 0)
-        nii_image.header.set_xyzt_units(2)  # set units for xyz (leave t as unknown)
-        # nii_image.to_filename(nifti_file)
+        nii_image.header.set_xyzt_units(2)
+        nifti_file = os.path.join(output_directory, "Dental_0001_0000.nii.gz")
         nib.save(nii_image, nifti_file)
+        print("Saving nifti file", time.time() - t0)
 
-        end_time = time.time()
-        print("Saving nifti file", end_time-start_time)
-
-
-
-    (xMin, xMax, yMin, yMax, zMin, zMax) = dataImporter.GetWholeExtent()
-    (xSpacing, ySpacing, zSpacing) = dataImporter.GetDataSpacing()
-    (x0, y0, z0) = dataImporter.GetDataOrigin()
-    center = [x0 + xSpacing * 0.5 * (xMin + xMax),
-              y0 + ySpacing * 0.5 * (yMin + yMax),
-              z0 + zSpacing * 0.5 * (zMin + zMax)]
-    
-    print(xMin, xMax, yMin, yMax, zMin, zMax, xSpacing, ySpacing, zSpacing, x0,y0,z0, center)
-    #print(iRescaleSlope, iRescaleIntercept, iWindowCenter, iWindowWidth)
+    xMin, xMax, yMin, yMax, zMin, zMax = dataImporter.GetWholeExtent()
+    xSp, ySp, zSp = dataImporter.GetDataSpacing()
+    x0, y0, z0 = dataImporter.GetDataOrigin()
+    center = [x0 + xSp * 0.5 * (xMin + xMax),
+              y0 + ySp * 0.5 * (yMin + yMax),
+              z0 + zSp * 0.5 * (zMin + zMax)]
+    print(xMin, xMax, yMin, yMax, zMin, zMax, xSp, ySp, zSp, x0, y0, z0, center)
 
     shiftScale = vtk.vtkImageShiftScale()
     shiftScale.SetScale(iRescaleSlope)
@@ -781,128 +431,85 @@ def load_dicom(directory,blendType=3,makenifti=False):
     shiftScale.SetInputConnection(dataImporter.GetOutputPort())
     shiftScale.Update()
 
-    volume = vtk.vtkVolume()
-    #mapper = vtk.vtkGPUVolumeRayCastMapper()
-    mapper = vtk.vtkOpenGLGPUVolumeRayCastMapper()
-    mapper.SetInputConnection(shiftScale.GetOutputPort())
-    
+    rowCosine   = numpy.array(direction_x)
+    colCosine   = numpy.array(direction_y)
+    sliceCosine = numpy.cross(rowCosine, colCosine)
+
     rotation_matrix = numpy.column_stack((rowCosine, colCosine, sliceCosine))
-    # Create the 4x4 transformation matrix
     transform_matrix = numpy.eye(3)
     transform_matrix[:3, :3] = rotation_matrix.T
-    
+
     mat = vtk.vtkMatrix4x4()
     for i in range(3):
         for j in range(3):
-            mat.SetElement(i,j,transform_matrix[i,j])
-        mat.SetElement(i,3,-origin[i])
+            mat.SetElement(i, j, transform_matrix[i, j])
+        mat.SetElement(i, 3, -origin[i])
 
+    volume = vtk.vtkVolume()
+    mapper = vtk.vtkOpenGLGPUVolumeRayCastMapper()
+    mapper.SetInputConnection(shiftScale.GetOutputPort())
     volume.SetUserMatrix(mat)
-   
-    # max_npV, min_npV, adjThresholds
 
-    # Transfer Function
-    colorFun = vtk.vtkColorTransferFunction()
+    colorFun   = vtk.vtkColorTransferFunction()
     opacityFun = vtk.vtkPiecewiseFunction()
-    gradientFun = vtk.vtkPiecewiseFunction()
-    # Create the property and attach the transfer functions
-    property = vtk.vtkVolumeProperty()
-    # property.SetIndependentComponents(independentComponents);
-    property.SetColor(colorFun)
-    property.SetScalarOpacity(opacityFun)
-    #property.SetGradientOpacity(gradientFun)
-    property.SetInterpolationTypeToLinear()
-    # Try other volume rendering options
-    
-    opacityWindow = 2048 #(max_npV-min_npV)/4.0
-    opacityLevel = 1024 #(max_npV-min_npV)/2.0
+    prop = vtk.vtkVolumeProperty()
+    prop.SetColor(colorFun)
+    prop.SetScalarOpacity(opacityFun)
+    prop.SetInterpolationTypeToLinear()
 
-    if (blendType == 0):  # MIP
+    opacityWindow, opacityLevel = 2048, 1024
+    mn = min_npV * iRescaleSlope + iRescaleIntercept
+    mx = max_npV * iRescaleSlope + iRescaleIntercept
+    t0_adj, t1_adj, t2_adj = adjThresholds
+
+    if blendType == 0:   # MIP
         colorFun.AddRGBSegment(0.0, 1.0, 1.0, 1.0, 255.0, 1.0, 1.0, 1.0)
-        opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0, opacityLevel + 0.5 * opacityWindow, 1.0)
+        opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0,
+                              opacityLevel + 0.5 * opacityWindow, 1.0)
         mapper.SetBlendModeToMaximumIntensity()
-    elif (blendType == 1):  # ShadeOff
-        colorFun.AddRGBSegment(opacityLevel - 0.5 * opacityWindow, 0.0, 0.0, 0.0, opacityLevel + 0.5 * opacityWindow,
-                               1.0, 1.0, 1.0)
-        opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0, opacityLevel + 0.5 * opacityWindow, 1.0)
+
+    elif blendType == 1:  # Composite, no shading
+        colorFun.AddRGBSegment(opacityLevel - 0.5 * opacityWindow, 0.0, 0.0, 0.0,
+                               opacityLevel + 0.5 * opacityWindow, 1.0, 1.0, 1.0)
+        opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0,
+                              opacityLevel + 0.5 * opacityWindow, 1.0)
         mapper.SetBlendModeToComposite()
-        property.ShadeOff()
-    elif (blendType == 2):  # Shade On
-        colorFun.AddRGBSegment(opacityLevel - 0.5 * opacityWindow, 0.0, 0.0, 0.0, opacityLevel + 0.5 * opacityWindow,1.0, 1.0, 1.0)
-        opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0, opacityLevel + 0.5 * opacityWindow, 1.0)
+        prop.ShadeOff()
+
+    elif blendType == 2:  # Composite, shading on
+        colorFun.AddRGBSegment(opacityLevel - 0.5 * opacityWindow, 0.0, 0.0, 0.0,
+                               opacityLevel + 0.5 * opacityWindow, 1.0, 1.0, 1.0)
+        opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0,
+                              opacityLevel + 0.5 * opacityWindow, 1.0)
         mapper.SetBlendModeToComposite()
-        property.ShadeOn()
-    elif (blendType == 3):  # CT Bone1
-        """# for 1st threshold, (width: 80), left, center,right
-        # point1, adjThresholds[0], O = 0
-        # point2, adjThresholds[0]+width/2, O=0.5, 0.25
-        # point3, adjThresholds[0]+width, O = 0
-        # for 1st threshold, (width: 160), left, center,right
-        # point4, adjThresholds[2]-width/2, O=0
-        # point5, adjThresholds[2]+width/2, O=0.5
-        # point6, 3072, O=0.5 """
+        prop.ShadeOn()
 
-        colorFun.AddRGBPoint(min_npV*iRescaleSlope+iRescaleIntercept, 0.3, 0.3, 1.0, 0.5, 0.0)
-        colorFun.AddRGBPoint(adjThresholds[0], 0.95, 0.95, 0.85, 0.5, 0.0)
-        colorFun.AddRGBPoint((adjThresholds[0]+adjThresholds[2])/2, 0.75, 0.4, 0.35, 0.5, 0.0)
-        colorFun.AddRGBPoint(adjThresholds[2], .95, .84, .19, .5, 0.0)
-        colorFun.AddRGBPoint(max_npV*iRescaleSlope+iRescaleIntercept, 0.78, 0.78, 0.92, .5, 0.0)
+    elif blendType in (3, 5):  # CT Bone1 / CT Bone2
+        width_s = 80
+        colorFun.AddRGBPoint(mn, 0.3, 0.3, 1.0, 0.5, 0.0)
+        colorFun.AddRGBPoint(t0_adj, 0.95, 0.95, 0.85, 0.5, 0.0)
+        colorFun.AddRGBPoint((t0_adj + t2_adj) / 2, 0.75, 0.4, 0.35, 0.5, 0.0)
+        colorFun.AddRGBPoint(t2_adj, 0.95, 0.84, 0.19, 0.5, 0.0)
+        colorFun.AddRGBPoint(mx, 0.78, 0.78, 0.92, 0.5, 0.0)
 
-        
-        width_s=80
-        width_l=160
-        opacityFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        # Right
-        opacityFun.AddPoint(adjThresholds[0], .0, .5, .0)
-        opacityFun.AddPoint(adjThresholds[0]+width_s/2.0, 0.5, .5, .0)
-        opacityFun.AddPoint(adjThresholds[0]+width_s, 0.0, .5, .0)
-        opacityFun.AddPoint(adjThresholds[1], 0, .5, .0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(adjThresholds[2], 0.5, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(max_npV*iRescaleSlope+iRescaleIntercept, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        
-        
-        gradientFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept, 1.0, 0.5,.0)
-        gradientFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept + (max_npV-min_npV)*0.2,.0,0.5,.0)
-        #gradientFun.AddPoint(28.,.0,0.0,.0)
-        gradientFun.AddPoint(max_npV*iRescaleSlope+iRescaleIntercept,1.0,0.5,.0)
+        opacityFun.AddPoint(mn, 0, 0.5, 0.0)
+        if blendType == 3:  # Bone1: include soft-tissue peak
+            opacityFun.AddPoint(t0_adj, 0.0, 0.5, 0.0)
+            opacityFun.AddPoint(t0_adj + width_s / 2.0, 0.5, 0.5, 0.0)
+            opacityFun.AddPoint(t0_adj + width_s, 0.0, 0.5, 0.0)
+        opacityFun.AddPoint(t1_adj, 0, 0.5, 0.0)
+        opacityFun.AddPoint(t2_adj, 0.5, 0.5, 0.0)
+        opacityFun.AddPoint(mx, 0.75, 0.5, 0.0)
 
-        property.ShadeOn()
+        prop.ShadeOn()
         mapper.SetBlendModeToComposite()
-        property.SetAmbient(0.2)
-        property.SetDiffuse(1.0)
-        property.SetSpecular(0.0)
-        property.SetSpecularPower(1.0)
-        property.SetScalarOpacityUnitDistance(0.8919)
+        prop.SetAmbient(0.2)
+        prop.SetDiffuse(1.0)
+        prop.SetSpecular(0.0)
+        prop.SetSpecularPower(1.0)
+        prop.SetScalarOpacityUnitDistance(0.8919)
 
-    elif (blendType == 5): # CT Bone2
-        colorFun.AddRGBPoint(min_npV*iRescaleSlope+iRescaleIntercept, 0.3, 0.3, 1.0, 0.5, 0.0)
-        colorFun.AddRGBPoint(adjThresholds[0], 0.95, 0.95, 0.85, 0.5, 0.0)
-        colorFun.AddRGBPoint((adjThresholds[0]+adjThresholds[2])/2, 0.75, 0.4, 0.35, 0.5, 0.0)
-        colorFun.AddRGBPoint(adjThresholds[2], .95, .84, .19, .5, 0.0)
-        colorFun.AddRGBPoint(max_npV*iRescaleSlope+iRescaleIntercept, 0.78, 0.78, 0.92, .5, 0.0)
-
-        
-        width_s=80
-        opacityFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        # Right
-        opacityFun.AddPoint(adjThresholds[1], 0, .5, .0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(adjThresholds[2], 0.5, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        opacityFun.AddPoint(max_npV*iRescaleSlope+iRescaleIntercept, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-        
-        
-        gradientFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept, 1.0, 0.5,.0)
-        gradientFun.AddPoint(min_npV*iRescaleSlope+iRescaleIntercept + (max_npV-min_npV)*0.2,.0,0.5,.0)
-        #gradientFun.AddPoint(28.,.0,0.0,.0)
-        gradientFun.AddPoint(max_npV*iRescaleSlope+iRescaleIntercept,1.0,0.5,.0)
-
-        property.ShadeOn()
-        mapper.SetBlendModeToComposite()
-        property.SetAmbient(0.2)
-        property.SetDiffuse(1.0)
-        property.SetSpecular(0.0)
-        property.SetSpecularPower(1.0)
-        property.SetScalarOpacityUnitDistance(0.8919)
     volume.SetMapper(mapper)
-    volume.SetProperty(property)
+    volume.SetProperty(prop)
 
-    return min_npV*iRescaleSlope+iRescaleIntercept,max_npV*iRescaleSlope+iRescaleIntercept, adjThresholds, [dx,dy,dz], volume
+    return mn, mx, adjThresholds, [dx, dy, dz], volume

@@ -1,45 +1,46 @@
 import sys
 import numpy
-from pathlib import Path
 import subprocess, time
 from PIL import Image as im
 
 import pymongo
-import os, glob, json
+import os
 from bson import ObjectId
-import matplotlib.pyplot as plt
 
-from PySide6.QtGui import QGuiApplication, QWindow
-from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
-from PySide6.QtCore import Qt, QObject, QFileInfo, QAbstractTableModel, QModelIndex, QDir, QUrl, qDebug, Signal, Slot, QRunnable, QThreadPool, Property
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QUrl, Signal, Slot
 from PySide6.QtQuick import QQuickView
 
 from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkRenderer
-# load implementations for rendering and interaction factory classes
 import vtkmodules.vtkRenderingOpenGL2
 import vtkmodules.vtkInteractionStyle
 import vtkmodules.util.numpy_support
-from vtkmodules.vtkCommonTransforms import vtkTransform
 import QVTKRenderWindowInteractor as QVTK
 QVTKRenderWindowInteractor = QVTK.QVTKRenderWindowInteractor
-from vtkmodules.vtkInteractionWidgets import (
-    vtkBoxWidget,
-    vtkBoxWidget2,
-    vtkBoxRepresentation
-)
-import ScanDirectory 
+from vtkmodules.vtkInteractionWidgets import vtkBoxWidget
+import ScanDirectory
 
 import vtk
 import nibabel as nib
 
 if QVTK.PyQtImpl == 'PySide6':
-    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QMainWindow
 
-# Mongo Atlas URI — set MONGO_URI in environment or .env file
 uri = os.environ.get("MONGO_URI")
 if not uri:
     raise RuntimeError("MONGO_URI environment variable is not set")
+
+# (mongo_path_field, buttonStatus_index, stl_opacity)
+_STL_MODELS = {
+    "Mandible":    ("mandible_path",    1, 0.3),
+    "Maxiilary":   ("maxilla_path",     2, 0.3),
+    "Upper":       ("upper_path",       3, 0.3),
+    "Left Sinus":  ("left_sinus_path",  4, 1.0),
+    "Right Sinus": ("right_sinus_path", 5, 1.0),
+    "Lower":       ("lower_path",       6, 0.3),
+    "Left Nerve":  ("left_nerve_path",  7, 1.0),
+    "Right Nerve": ("right_nerve_path", 8, 1.0),
+}
+
 
 class TableModel(QAbstractTableModel):
     selected = Signal(int)
@@ -56,9 +57,8 @@ class TableModel(QAbstractTableModel):
 
     def __init__(self):
         QAbstractTableModel.__init__(self)
-        #super(TableModel, self).__init__(parent)
         self.rows = []
-    
+
     def rowCount(self, parent):
         return len(self.rows)
 
@@ -68,65 +68,29 @@ class TableModel(QAbstractTableModel):
     def fill_row(self, studies):
         for x in studies:
             self.rows.append(list(x.values())[1:])
-            #print(list(x.values())[1:])
+
     def update_comment(self, row, comment_str):
-        self.rows[row]['comment']=comment_str
+        self.rows[row]['comment'] = comment_str
 
     def data(self, index, role=Qt.DisplayRole):
-        """ Depending on the index and role given, return data. If not 
-            returning data, return None (PySide equivalent of QT's 
-            "invalid QVariant").
-        """
         if not index.isValid():
             return None
-
         if not 0 <= index.row() < len(self.rows):
             return None
-        
-        #print(str(Qt.DisplayRole)+"Role: "+str(role))
-
         if role == Qt.DisplayRole:
-            patient_id = self.rows[index.row()][0]
-            patient_name = self.rows[index.row()][1]
-            study_uid = self.rows[index.row()][2]
-            study_date = self.rows[index.row()][3]
-            comment = self.rows[index.row()][4]
-            if index.column() == 0:
-                return patient_id
-            elif index.column() == 1:
-                return patient_name
-            elif index.column() == 2:
-                return study_uid
-            elif index.column() == 3:
-                return study_date
-            elif index.column() == 4:
-                return comment
-            
-        
+            return self.rows[index.row()][index.column()]
         return None
 
     def headerData(self, section, orientation=Qt.Horizontal, role=Qt.DisplayRole):
-        """ Set the headers to be displayed. """
         if role != Qt.DisplayRole:
-            # print(str(Qt.DisplayRole)+"Role: "+str(role))
             return None
-
         if orientation == Qt.Horizontal:
-            if section == 0:
-                return "Patient ID"
-            elif section == 1:
-                return "Patient Name"
-            elif section == 2:
-                return "Study UID"
-            elif section == 3:
-                return "Study Date"
-            elif section == 4:
-                return "Comment"
-        
+            headers = ["Patient ID", "Patient Name", "Study UID", "Study Date", "Comment"]
+            if 0 <= section < len(headers):
+                return headers[section]
         return None
 
 
-# Extent class with vertex iterator
 class Extent:
     def __init__(self, x1, x2, y1, y2, z1, z2):
         self.x1, self.x2 = x1, x2
@@ -141,85 +105,44 @@ class Extent:
 
 
 from scipy.ndimage import label
-MinConnectedVoxel = 5000
+MIN_CONNECTED_VOXEL = 5000
+
 
 def find_connected_elements_3d(m, v):
-    # Create a binary mask where elements equal to v are True, others are False
     mask = (m == v)
-    
-    # Use scipy's label function to identify connected components
     labeled_array, num_features = label(mask)
-    
-    # Get the indices for each labeled region
-    indices = [numpy.argwhere(labeled_array == i) for i in range(1, num_features + 1)]
-    
-    return indices
+    return [numpy.argwhere(labeled_array == i) for i in range(1, num_features + 1)]
+
 
 def calculate_3d_extent(np_image, value):
-    """
-    Calculate the extent (x1, x2, y1, y2, z1, z2) of a 3D numpy array where elements have a specific value.
-    
-    Parameters:
-    np_image (numpy.ndarray): 3D numpy array
-    value: The specific value to search for in the array
-    
-    Returns:
-    tuple: (x1, x2, y1, y2, z1, z2) where (x1, y1, z1) is the minimum extent and (x2, y2, z2) is the maximum extent
-    """
-    # Find the indices where the value occurs
     connected_indices = find_connected_elements_3d(np_image, value)
     print("num of connected_indices:", len(connected_indices))
 
-    firstTime = True
+    indices = None
     for i, group in enumerate(connected_indices):
-        print(value, i, group,group.shape)
-        if (group.shape)[0]>=MinConnectedVoxel:
-            if (firstTime): 
-                indices = numpy.copy(group)
-                firstTime = False
-            else: indices = numpy.concatenate((indices, group), axis=0)            
-    """
-    indices = numpy.where(np_image == value)
-    if len(indices[0]) == 0:
-        return None  # Value not found in the array
+        print(value, i, group.shape)
+        if group.shape[0] >= MIN_CONNECTED_VOXEL:
+            indices = group if indices is None else numpy.concatenate((indices, group), axis=0)
 
-    # Calculate the extents
-    x1, x2 = numpy.min(indices[0]), numpy.max(indices[0])
-    y1, y2 = numpy.min(indices[1]), numpy.max(indices[1])
-    z1, z2 = numpy.min(indices[2]), numpy.max(indices[2])
-    """
-    
-    if (not firstTime): # Calculate the extents
-        x1, x2 = numpy.min(indices[:,0]), numpy.max(indices[:,0])
-        y1, y2 = numpy.min(indices[:,1]), numpy.max(indices[:,1])
-        z1, z2 = numpy.min(indices[:,2]), numpy.max(indices[:,2])
+    if indices is not None:
+        x1, x2 = numpy.min(indices[:, 0]), numpy.max(indices[:, 0])
+        y1, y2 = numpy.min(indices[:, 1]), numpy.max(indices[:, 1])
+        z1, z2 = numpy.min(indices[:, 2]), numpy.max(indices[:, 2])
         return x1, x2, y1, y2, z1, z2
-    else:
-        return 0,0,0,0,0,0
+    return 0, 0, 0, 0, 0, 0
 
-def box_callback(obj, ev):
-    # Just do this to demonstrate who called callback and the event that triggered it.
-    # print(obj.class_name, 'Event Id:', ev)
-    t = vtkTransform()
-    obj.GetRepresentation().GetTransform(t)
-    # Remember to add the actor as an attribute before registering
-    # this callback with the object that it is observing.
-    box_callback.actor.user_transform = t
 
 class MAINApp(QQuickView):
-    
+
     def __init__(self, exec_param=None, *args, **kwds):
         super().__init__(*args, **kwds)
 
         try:
             client = pymongo.MongoClient(uri)
-        # return a friendly error if a URI error is thrown 
-        # except pymongo.errors.ConnectionFailure as e:
         except pymongo.errors.ConfigurationError as e:
-            print(e,"An Invalid URI host error was received. Is your Atlas host name correct in your connection string?")
+            print(e, "An Invalid URI host error was received. Is your Atlas host name correct in your connection string?")
             sys.exit(1)
 
-        # Send a ping to confirm a successful connection
         try:
             client.admin.command('ping')
             print("Pinged your deployment. You successfully connected to MongoDB!")
@@ -234,82 +157,54 @@ class MAINApp(QQuickView):
         self.renderDir = 1
         self.makeNifti = True
         self.spacing = [.0, .0, .0]
+
         results = self.collection.aggregate([
-        {
-            '$project': {
-                'path': 1, 
+            {'$project': {
+                'path': 1,
                 'missing_teeth_numbers': {
                     '$filter': {
-                        'input': '$teeth', 
-                        'as': 'tooth', 
-                        'cond': {
-                            '$eq': [
-                                '$$tooth.missing', True
-                            ]
-                        }
+                        'input': '$teeth',
+                        'as': 'tooth',
+                        'cond': {'$eq': ['$$tooth.missing', True]}
                     }
                 }
-            }
-        }, {
-            '$addFields': {
+            }},
+            {'$addFields': {
                 'missing_teeth_numbers': {
-                    '$map': {
-                        'input': '$missing_teeth_numbers', 
-                        'as': 'tooth', 
-                        'in': '$$tooth.number'
-                    }
-                }, 
-                'missing_teeth_count': {
-                    '$size': '$missing_teeth_numbers'
-                }
-            }
-        }, {
-            '$match': {
-                'missing_teeth_count': {
-                    '$lte': 6
-                }
-            }
-        }, {
-            '$project': { 
-                '_id': 1,
-                'path': 1,
-                'missing_teeth_numbers': 1
-            }
-        }])
+                    '$map': {'input': '$missing_teeth_numbers', 'as': 'tooth', 'in': '$$tooth.number'}
+                },
+                'missing_teeth_count': {'$size': '$missing_teeth_numbers'}
+            }},
+            {'$match': {'missing_teeth_count': {'$lte': 6}}},
+            {'$project': {'_id': 1, 'path': 1, 'missing_teeth_numbers': 1}}
+        ])
 
         res = list(results)
         self.allres = []
-        for i in range(len(res)): 
-            for j in res[i]["missing_teeth_numbers"]:
-                if j==35 or j==45: 
-                    #print(res[i]["_id"], res[i]["path"], res[i]["missing_teeth_numbers"])
-                    results = self.collection.find({'_id': res[i]["_id"]}, {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "comment": 1, "_id": 1 })
-                    rec = list(results)
-                    #rec[0]["study_date"] = str(rec[0]["study_date"])
-                    #rec[0]["comment"] = str(rec[0]["comment"])
-                    self.allres.append(*rec)
+        for rec in res:
+            for tooth_num in rec["missing_teeth_numbers"]:
+                if tooth_num in (35, 45):
+                    docs = list(self.collection.find(
+                        {'_id': rec["_id"]},
+                        {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "comment": 1, "_id": 1}
+                    ))
+                    self.allres.append(*docs)
 
-        # Saturate TableModel   
-        #results = self.collection.find({}, {"patient_id": 1, "patient_name": 1, "study_uid": 1, "study_date": 1, "comment": 1, "_id": 1 })
-
-        #self.allres = list(results)
-        # print(self.allres)
         self.studyUID = None
-
         self.my_TableModel = TableModel()
         self.my_TableModel.fill_row(self.allres)
 
-        self.rootContext().setContextProperty("my_TableModel",self.my_TableModel)
+        self.rootContext().setContextProperty("my_TableModel", self.my_TableModel)
         _win_source = QUrl.fromLocalFile(os.path.join(os.path.dirname(__file__), 'dbwin.qml'))
         self.setSource(_win_source)
 
         self.setResizeMode(QQuickView.SizeRootObjectToView)
         self.setTitle("Relu Result Viewer")
         self.resize(640, 960)
-        self.setPosition(40,40)
+        self.setPosition(40, 40)
 
         self.window = QMainWindow()
-        self.window.resize(960,960)
+        self.window.resize(960, 960)
         self.widget = QVTKRenderWindowInteractor(self.window)
         self.window.setCentralWidget(self.widget)
         self.ren = vtkRenderer()
@@ -317,35 +212,22 @@ class MAINApp(QQuickView):
         self.ren.SetUseDepthPeeling(True)
         self.ren.UseDepthPeelingForVolumesOn()
 
-        # show the widget
-        self.window.move(680,10)
+        self.window.move(680, 10)
         self.window.show()
 
         self.istyle = vtk.vtkInteractorStyleTrackballCamera()
         self.widget._Iren.SetInteractorStyle(self.istyle)
-
         self.widget.Initialize()
         self.widget.Start()
-
         print(self.widget.width(), self.widget.height())
 
-        # models 
-        self.nModel = 0
         self.volume = None
-        self.mandible = None
-        self.maxilla = None
-        self.upper = None
-        self.lower = None
-        self.lSinus = None
-        self.rSinus = None
-        self.lNerve = None
-        self.rNerve = None
-        self.box_widget = None
-        self.box_widget1 = None
-        self.box_widget2 = None
-        self.box_widget3 = None
+        self._camera_initialized = False
+        self._stl_meshes = {}
+        self._stl_actors = {}
+        self.box_widgets = []
+        self.wcs_extent = []
 
-        # Connect TableView.selectedRow to fill_study
         self.my_TableModel.selected.connect(self.set_buttons_status)
         self.my_TableModel.clickedButton.connect(self.add_model)
         self.my_TableModel.segment.connect(self.segment)
@@ -354,686 +236,322 @@ class MAINApp(QQuickView):
         self.my_TableModel.captureScreen.connect(self.captureScreen)
         self.my_TableModel.saveComment.connect(self.saveComment)
 
-    @Slot(int) #TableView selectedRow(int) signal handler
-    def set_buttons_status(self, row=0):
-        """ Find row in allres and emit signals to fill text(patientName,StudyDate), 
-            to list of 9 bool's, 32 bool's to on/off button """
-
-        filter={
-            '_id': ObjectId(self.allres[row]['_id'])
-        }
-        results = self.collection.find( filter=filter )
-        res = list(results)
-        self.currentRow = res[0]
-        self.rowNum = row
-        #print(self.currentRow)
-        self.studyUID = self.currentRow['study_uid']
-        print("Current studyUID:",self.studyUID)
-
-        #Clean up the model
-        self.nModel = 0
-        if (self.volume): 
+    def _cleanup_scene(self):
+        if self.volume:
             self.ren.RemoveVolume(self.volume)
             self.volume = None
-            if self.box_widget:
-                self.box_widget.Off()
-                self.box_widget1.Off()
-                self.box_widget2.Off()
-                self.box_widget3.Off()
-                self.box_widget = None
-                self.box_widget1 = None
-                self.box_widget2 = None
-                self.box_widget3 = None
-        if (self.mandible):
-            self.mandible = None
-            self.ren.RemoveActor(self.mandibleActor)
-        if (self.maxilla):
-            self.maxilla = None
-            self.ren.RemoveActor(self.maxillaActor)
-        if (self.upper):
-            self.upper = None
-            self.ren.RemoveActor(self.upperActor)
-        if (self.lower):
-            self.lower = None
-            self.ren.RemoveActor(self.lowerActor)
-        if (self.lSinus): 
-            self.lSinus = None
-            self.ren.RemoveActor(self.lSinusActor)
-        if (self.rSinus): 
-            self.rSinus = None
-            self.ren.RemoveActor(self.rSinusActor)
-        if (self.lNerve): 
-            self.lNerve = None
-            self.ren.RemoveActor(self.lNerveActor)
-        if (self.rNerve):
-            self.rNerve = None
-            self.ren.RemoveActor(self.rNerveActor)
-   
-        # Make 
-        print(res[0]['patient_name'], res[0]['study_date'])
+        for bw in self.box_widgets:
+            bw.Off()
+        self.box_widgets.clear()
+        for actor in self._stl_actors.values():
+            self.ren.RemoveActor(actor)
+        self._stl_meshes.clear()
+        self._stl_actors.clear()
+        self._camera_initialized = False
+        self.wcs_extent = []
+
+    @Slot(int)
+    def set_buttons_status(self, row=0):
+        results = self.collection.find(filter={'_id': ObjectId(self.allres[row]['_id'])})
+        res = list(results)
+        self.rowNum = row
+        self.currentRow = res[0]
+        self.studyUID = self.currentRow['study_uid']
+        print("Current studyUID:", self.studyUID)
+
+        self._cleanup_scene()
+
+        rec = res[0]
+        print(rec['patient_name'], rec['study_date'])
         self.buttonStatus = [0] * 41
 
-        if (os.path.exists(os.path.join(res[0]['path'],'cvt'))): 
-            print(os.path.join(res[0]['path'],'cvt'))
-            self.buttonStatus[0]=1
-        if (len(res[0]['lower_path'])!=0 and os.path.exists(res[0]['lower_path'])): 
-            print(res[0]['lower_path'])
-            self.buttonStatus[6]=1
-        if (len(res[0]['upper_path'])!=0 and os.path.exists(res[0]['upper_path'])): 
-            print(res[0]['upper_path'])
-            self.buttonStatus[3]=1
-        if (len(res[0]['mandible_path'])!=0 and os.path.exists(res[0]['mandible_path'])): 
-            print(res[0]['mandible_path'])
-            self.buttonStatus[1]=1
-        if (len(res[0]['maxilla_path'])!=0 and os.path.exists(res[0]['maxilla_path'])):
-            print(res[0]['maxilla_path'])
-            self.buttonStatus[2]=1
-        if (len(res[0]['left_sinus_path'])!=0 and os.path.exists(res[0]['left_sinus_path'])): 
-            print(res[0]['left_sinus_path'])
-            self.buttonStatus[4]=1
-        if (len(res[0]['right_sinus_path'])!=0 and os.path.exists(res[0]['right_sinus_path'])): 
-            print(res[0]['right_sinus_path'])
-            self.buttonStatus[5]=1
-        if (len(res[0]['left_nerve_path'])!=0 and os.path.exists(res[0]['left_nerve_path'])): 
-            print(res[0]['left_nerve_path'])
-            self.buttonStatus[7]=1
-        if (len(res[0]['right_nerve_path'])!=0 and os.path.exists(res[0]['right_nerve_path'])): 
-            print(res[0]['right_nerve_path'])
-            self.buttonStatus[8]=1
+        if os.path.exists(os.path.join(rec['path'], 'cvt')):
+            print(os.path.join(rec['path'], 'cvt'))
+            self.buttonStatus[0] = 1
 
-        print (self.buttonStatus)
+        for path_field, btn_idx, _ in _STL_MODELS.values():
+            p = rec.get(path_field, '')
+            if p and os.path.exists(p):
+                print(p)
+                self.buttonStatus[btn_idx] = 1
 
-        teeth_list =  res[0]['teeth']
+        print(self.buttonStatus)
 
-        i=9
-        for x in teeth_list: # for each teeth number, missing, toothpath
-            #print(x["missing"], x["number"], x["tooth_path"])
-            if (not x["missing"] and os.path.exists(x["tooth_path"])):
-                print(i,x["missing"], x["number"], x["tooth_path"])
-                self.buttonStatus[i]=1
-            i+=1
+        for i, tooth in enumerate(rec['teeth'], start=9):
+            if not tooth["missing"] and os.path.exists(tooth["tooth_path"]):
+                print(i, tooth["missing"], tooth["number"], tooth["tooth_path"])
+                self.buttonStatus[i] = 1
 
-        print (self.buttonStatus)
-
+        print(self.buttonStatus)
         self.my_TableModel.changeButtonStatus.emit(self.buttonStatus)
 
+    def _setup_camera(self):
+        fp = numpy.array(self.ren.GetActiveCamera().GetFocalPoint())
+        dist = self.ren.GetActiveCamera().GetDistance()
+        self.ren.GetActiveCamera().SetPosition(fp[0], fp[1] - dist, fp[2])
+        self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0)
+        self.ren.GetActiveCamera().ParallelProjectionOn()
+        self.ren.ResetCameraClippingRange()
+        self.ren.ResetCamera()
+        print("Renderwindow size:", self.widget.GetRenderWindow().GetSize())
+        self._camera_initialized = True
+
+    def _toggle_stl(self, name, path_field, btn_idx, opacity):
+        if self.buttonStatus[btn_idx] == 1:
+            if name not in self._stl_meshes:
+                reader = vtk.vtkSTLReader()
+                reader.SetFileName(self.currentRow[path_field])
+                reader.MergingOn()
+                reader.Update()
+                self._stl_meshes[name] = reader.GetOutput()
+                print("Open", self.currentRow[path_field], self._stl_meshes[name].GetBounds())
+            mapper = vtkPolyDataMapper()
+            mapper.SetInputDataObject(self._stl_meshes[name])
+            actor = vtkActor()
+            actor.SetMapper(mapper)
+            actor.GetProperty().SetOpacity(opacity)
+            self._stl_actors[name] = actor
+            self.ren.AddActor(actor)
+            self.buttonStatus[btn_idx] = 2
+        elif self.buttonStatus[btn_idx] == 2:
+            self.ren.RemoveActor(self._stl_actors.pop(name))
+            self.buttonStatus[btn_idx] = 1
 
     @Slot(str)
     def add_model(self, name):
-        print(name + " Clicked! ")   
-        # in case name = 'ct'
-        if (name == 'CT'):
-            if (self.buttonStatus[0]==1):
-                # load_ct_data
-                if (self.volume==None): 
-                    if self.makeNifti:
-                        outdir = os.path.join(self.currentRow['path'],'segment')
-                        if not os.path.exists(outdir):
-                            os.makedirs(outdir)
-                self.min_npV, self.max_npV, self.adjThresholds, self.spacing, self.volume = ScanDirectory.load_dicom(os.path.join(self.currentRow['path'],'cvt'), 3, True) #self.makeNifti
+        print(name + " Clicked! ")
+
+        if name == 'CT':
+            if self.buttonStatus[0] == 1:
+                if self.makeNifti:
+                    os.makedirs(os.path.join(self.currentRow['path'], 'segment'), exist_ok=True)
+                self.min_npV, self.max_npV, self.adjThresholds, self.spacing, self.volume = \
+                    ScanDirectory.load_dicom(os.path.join(self.currentRow['path'], 'cvt'), 3, True)
                 self.ren.AddVolume(self.volume)
-                self.buttonStatus[0]=2
-                self.nModel+=1
-            elif (self.buttonStatus[0]==2):
-                # hide volume and 
+                self.buttonStatus[0] = 2
+            elif self.buttonStatus[0] == 2:
                 self.ren.RemoveVolume(self.volume)
-                self.buttonStatus[0]=1    
-        elif (name == "Mandible"):    
-            # Handle Mandible button click
-            if (self.buttonStatus[1]==1):
-                # load mandible.stl
-                if (self.mandible==None):
-                    self.nModel+=1
-                    reader = vtk.vtkSTLReader()
-                    reader.SetFileName(self.currentRow['mandible_path'])
-                    reader.MergingOn()
-                    reader.Update()
-                    self.mandible = reader.GetOutput()                                        
-                    bound = self.mandible.GetBounds()
-                    print("Open "+self.currentRow['mandible_path'], bound)                    
-                self.mandibleMapper = vtkPolyDataMapper()
-                self.mandibleMapper.SetInputDataObject(self.mandible)
-                self.mandibleActor = vtkActor()
-                self.mandibleActor.GetProperty().SetOpacity(0.3)
-                self.mandibleActor.SetMapper(self.mandibleMapper)
-                self.ren.AddActor(self.mandibleActor)
-                self.buttonStatus[1]=2
-            elif (self.buttonStatus[1]==2):
-                # hide mandible.stl
-                self.ren.RemoveActor(self.mandibleActor)
-                self.buttonStatus[1]=1
-        elif (name == "Maxiilary"):    
-            if self.buttonStatus[2] == 1:
-                if (self.maxilla==None):
-                    self.nModel+=1
-                    # load maxilla.stl
-                    reader = vtk.vtkSTLReader()
-                    reader.SetFileName(self.currentRow['maxilla_path'])
-                    reader.MergingOn()
-                    reader.Update()
-                    self.maxilla = reader.GetOutput()
-                    bound = self.maxilla.GetBounds()  
-                    print("Open " + self.currentRow['maxilla_path'], bound)
-                self.maxillaMapper = vtkPolyDataMapper()
-                self.maxillaMapper.SetInputDataObject(self.maxilla)
-                self.maxillaActor = vtkActor()
-                self.maxillaActor.SetMapper(self.maxillaMapper)
-                self.maxillaActor.GetProperty().SetOpacity(0.3)
-                self.ren.AddActor(self.maxillaActor)
-                self.buttonStatus[2] = 2
-            elif self.buttonStatus[2] == 2:
-                # hide maxilla.stl
-                self.ren.RemoveActor(self.maxillaActor)
-                self.buttonStatus[2] = 1 
-        elif (name == "Upper"):
-            if self.buttonStatus[3] == 1:
-                if (self.upper == None):
-                    self.nModel+=1
-                    # load upper.stl
-                    reader = vtk.vtkSTLReader()
-                    reader.SetFileName(self.currentRow['upper_path'])
-                    reader.MergingOn()
-                    reader.Update()
-                    self.upper = reader.GetOutput()
-                    print("Open " + self.currentRow['upper_path'])
-                self.upperMapper = vtkPolyDataMapper()
-                self.upperMapper.SetInputDataObject(self.upper)
-                self.upperActor = vtkActor()
-                self.upperActor.SetMapper(self.upperMapper)
-                self.upperActor.GetProperty().SetOpacity(0.3)
-                self.ren.AddActor(self.upperActor)
-                self.buttonStatus[3] = 2
-            elif self.buttonStatus[3] == 2:
-                # hide upper.stl
-                self.ren.RemoveActor(self.upperActor)
-                self.buttonStatus[3] = 1                
-        elif (name == "Left Sinus"):    
-                if self.buttonStatus[4] == 1:
-                    if (self.lSinus==None):
-                        self.nModel+=1
-                        reader = vtk.vtkSTLReader()
-                        reader.SetFileName(self.currentRow['left_sinus_path'])
-                        reader.MergingOn()
-                        reader.Update()
-                        self.lSinus = reader.GetOutput()
-                        print("Open " + self.currentRow['left_sinus_path'])
-                    self.lSinusMapper = vtkPolyDataMapper()
-                    self.lSinusMapper.SetInputDataObject(self.lSinus)
-                    self.lSinusActor = vtkActor()
-                    self.lSinusActor.SetMapper(self.lSinusMapper)
-                    self.ren.AddActor(self.lSinusActor)
-                    self.buttonStatus[4] = 2
-                elif self.buttonStatus[4] == 2:
-                    self.ren.RemoveActor(self.lSinusActor)
-                    self.buttonStatus[4] = 1
-        elif (name == "Right Sinus"):    
-                if self.buttonStatus[5] == 1:
-                    if (self.rSinus==None):
-                        self.nModel+=1
-                        reader = vtk.vtkSTLReader()
-                        reader.SetFileName(self.currentRow['right_sinus_path'])
-                        reader.MergingOn()
-                        reader.Update()
-                        self.rSinus = reader.GetOutput()
-                        print("Open " + self.currentRow['right_sinus_path'])
-                    self.rSinusMapper = vtkPolyDataMapper()
-                    self.rSinusMapper.SetInputDataObject(self.rSinus)
-                    self.rSinusActor = vtkActor()
-                    self.rSinusActor.SetMapper(self.rSinusMapper)
-                    self.ren.AddActor(self.rSinusActor)
-                    self.buttonStatus[5] = 2
-                elif self.buttonStatus[5] == 2:
-                    self.ren.RemoveActor(self.rSinusActor)
-                    self.buttonStatus[5] = 1 
-        elif (name == "Lower"):    
-                if self.buttonStatus[6] == 1:
-                    if (self.lower == None):
-                        self.nModel+=1
-                        reader = vtk.vtkSTLReader()
-                        reader.SetFileName(self.currentRow['lower_path'])
-                        reader.MergingOn()
-                        reader.Update()
-                        self.lower = reader.GetOutput()
-                        print("Open " + self.currentRow['lower_path'])
-                    self.lowerMapper = vtkPolyDataMapper()
-                    self.lowerMapper.SetInputDataObject(self.lower)
-                    self.lowerActor = vtkActor()
-                    self.lowerActor.SetMapper(self.lowerMapper)
-                    self.lowerActor.GetProperty().SetOpacity(0.3)
-                    self.ren.AddActor(self.lowerActor)
-                    self.buttonStatus[6] = 2
-                elif self.buttonStatus[6] == 2:
-                    self.ren.RemoveActor(self.lowerActor)
-                    self.buttonStatus[6] = 1
-        elif (name == "Left Nerve"):    
-                if self.buttonStatus[7] == 1:
-                    if (self.lNerve == None):
-                        self.nModel+=1
-                        reader = vtk.vtkSTLReader()
-                        reader.SetFileName(self.currentRow['left_nerve_path'])
-                        reader.MergingOn()
-                        reader.Update()
-                        self.lNerve = reader.GetOutput()
-                        print("Open " + self.currentRow['left_nerve_path'])
-                    self.lNerveMapper = vtkPolyDataMapper()
-                    self.lNerveMapper.SetInputDataObject(self.lNerve)
-                    self.lNerveActor = vtkActor()
-                    self.lNerveActor.SetMapper(self.lNerveMapper)
-                    self.ren.AddActor(self.lNerveActor)
-                    self.buttonStatus[7] = 2
-                elif self.buttonStatus[7] == 2:
-                    self.ren.RemoveActor(self.lNerveActor)
-                    self.buttonStatus[7] = 1  
-        elif (name == "Right Nerve"):
-                if self.buttonStatus[8] == 1:
-                    if (self.rNerve==None):
-                        self.nModel+=1
-                        reader = vtk.vtkSTLReader()
-                        reader.SetFileName(self.currentRow['right_nerve_path'])
-                        reader.MergingOn()
-                        reader.Update()
-                        self.rNerve = reader.GetOutput()
-                        print("Open " + self.currentRow['right_nerve_path'])
-                    self.rNerveMapper = vtkPolyDataMapper()
-                    self.rNerveMapper.SetInputDataObject(self.rNerve)
-                    self.rNerveActor = vtkActor()
-                    self.rNerveActor.SetMapper(self.rNerveMapper)
-                    self.ren.AddActor(self.rNerveActor)
-                    self.buttonStatus[8] = 2
-                elif self.buttonStatus[8] == 2:
-                    self.ren.RemoveActor(self.rNerveActor)
-                    self.buttonStatus[8] = 1
+                self.buttonStatus[0] = 1
+        elif name in _STL_MODELS:
+            path_field, btn_idx, opacity = _STL_MODELS[name]
+            self._toggle_stl(name, path_field, btn_idx, opacity)
 
+        self.my_TableModel.changeButtonStatus.emit(self.buttonStatus)
 
-        self.my_TableModel.changeButtonStatus.emit(self.buttonStatus)        
+        if not self._camera_initialized and (self.volume or self._stl_actors):
+            self._setup_camera()
 
-        #DICOM is LPS (to L to P to Superior)
-        # from Anterior to Posterior Viewpoint, DICOM is LPS
-        if (self.nModel == 1):
-            # 1st entering, setup camera   
-            fp = numpy.array(self.ren.GetActiveCamera().GetFocalPoint())
-            p = numpy.array(self.ren.GetActiveCamera().GetPosition())
-            dist = self.ren.GetActiveCamera().GetDistance()
-            print(fp,p,dist)
-            # from Anterior 
-            self.ren.GetActiveCamera().SetPosition(fp[0], fp[1] - dist, fp[2])
-            self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
-            # from Left
-            #self.ren.GetActiveCamera().SetPosition(fp[0]+dist, fp[1], fp[2])
-            #self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
-            # from Head
-            #self.ren.GetActiveCamera().SetPosition(fp[0], fp[1], fp[2]+dist)
-            #self.ren.GetActiveCamera().SetViewUp(0.0, 1.0, 0.0);
-            self.ren.GetActiveCamera().ParallelProjectionOn()
-            self.ren.GetActiveCamera().GetViewTransformMatrix()
-            #print(self.ren.GetActiveCamera().GetViewTransformMatrix())
-            self.ren.ResetCameraClippingRange()
-            self.ren.ResetCamera()
-
-            # world coordinate bounding box () - (x1,y1,z1,x2,y2,z2)->(x1,y2,z1),(x2,y1,z1),(x2,y2,z1), (x1,y1,z2), (x1,y2,z2), (x2,y1,z2)
-            #print(self.window.)
-            print("Renderwindow size:",self.widget.GetRenderWindow().GetSize())
-            """
-            xy = self.volume.GetBounds()
-            print(xy)
-            coordinate = vtk.vtkCoordinate()
-            coordinate.SetCoordinateSystemToWorld()
-            coordinate.SetValue(xy[0],xy[2],xy[4])
-            #coordinate.SetValue(xy[1],xy[3],xy[5])
-            #coordinate.SetValue(-55.313, -52.437, -33.75)
-            viewCoord = coordinate.GetComputedViewportValue(self.ren)
-            dispCoord = coordinate.GetComputedDisplayValue(self.ren)
-            print(viewCoord, dispCoord) 
-            """
         self.widget.update()
-
-
 
     @Slot()
     def segment(self):
         print("segment")
 
-        # Define your directories
-        input_dir = os.path.join(self.currentRow['path'],'segment')
-        output_dir = os.path.join(self.currentRow['path'],'output')
+        input_dir = os.path.join(self.currentRow['path'], 'segment')
+        output_dir = os.path.join(self.currentRow['path'], 'output')
         os.makedirs(output_dir, exist_ok=True)
-        if os.path.exists(output_dir) and os.path.exists(input_dir):
-            start_time = time.time()
 
-            os.environ['nnUNet_raw'] = '.'
-            os.environ['nnUNet_results'] = '.'
-            os.environ['nnUNet_preprocessed'] = '.'
-
-            # Command to run the nnUNetv2_predict script
-            nnunet_command = (
-                f"nnUNetv2_predict -i {input_dir}/ -o {output_dir}/ "
-                "-d Dataset111_453CT -tr nnUNetTrainer -p nnUNetPlans "
-                "-c 3d_fullres -f 0 -npp 1 -nps 1 -step_size 0.5 -device cuda --disable_tta"
-            )
-            # Execute the command
-            subprocess.run(nnunet_command, shell=True) #, executable="/bin/bash"
-            end_time = time.time()
-            print("segmentation time:", end_time-start_time)
-
-            # 1,2,3,4,5 각각에 대해서 Rule이 필요할 듯
-            # maxilla는 있으면, 가장 큰 component 하나만 
-            # mandible은 있으면, 최대 두개의 component
-            # condyle(left, right) -> 이부분은 200장 정도 manual labeling 해야할 듯..
-
-            # upper -> maxilla 있는경우, 그보다 1.2배, 없는경우는 그대로...
-            
-            # lower -> upper 있는 경우, 그보다 1.2배, upper가 없는 경우, 
-
-
-
-            # 1,2,3,4,5각각에 대해서, ijk extent -> xyz extent in world coordinate
-            # capture의 경우에는 Anterior, Left 두 view에서, 
-            outfile = os.path.join(output_dir,"Dental_0001.nii.gz")
-            img = nib.load(outfile)            
-            npImage = (img.get_fdata()).transpose(2,1,0)
-            unique_labels = numpy.unique(npImage)
-
-            extent = []
-            self.wcs_extent = []
-            xo,yo,zo = self.volume.GetOrigin()
-            seg_label=[]
-            for i in range(1,6):
-                if (i not in unique_labels): # not segmented
-                    extent.append([0,0,0,0,0,0])
-                    self.wcs_extent([.0,.0,.0,.0,.0,.0])
-                    seg_label.append(False)
-                else:
-                    seg_label.append(True)
-                    extent.append(calculate_3d_extent(npImage,i))   
-                    k1, k2, j1, j2, i1, i2 = extent[i-1]
-                    #(i1, j1, k1) to (x1, y1, z1)
-                    x1 = i1*self.spacing[0]+xo
-                    y1 = j1*self.spacing[1]+yo
-                    z1 = k1*self.spacing[2]+zo
-                    #(i2, j2, k2) to (x2, y2, z2)
-                    x2 = i2*self.spacing[0]+xo
-                    y2 = j2*self.spacing[1]+yo
-                    z2 = k2*self.spacing[2]+zo                    
-                    self.wcs_extent.append([x1,x2,y1,y2,z1,z2])
-                    print(extent[i-1], self.wcs_extent[i-1], self.volume.GetBounds())
-                
-            self.box_widget = vtkBoxWidget()
-            self.box_widget.SetInteractor(self.widget)
-            self.box_widget.SetProp3D(self.volume)
-            self.box_widget.SetPlaceFactor(1.0)  # Make the box 1.25x larger than the actor
-            self.box_widget.PlaceWidget(self.wcs_extent[0])
-
-            self.box_widget1 = vtkBoxWidget()
-            self.box_widget1.SetInteractor(self.widget)
-            self.box_widget1.SetProp3D(self.volume)
-            self.box_widget1.SetPlaceFactor(1.0)  # Make the box 1.25x larger than the actor
-            self.box_widget1.PlaceWidget(self.wcs_extent[1])
-
-            self.box_widget2 = vtkBoxWidget()
-            self.box_widget2.SetInteractor(self.widget)
-            self.box_widget2.SetProp3D(self.volume)
-            self.box_widget2.SetPlaceFactor(1.0)  # Make the box 1.25x larger than the actor
-            self.box_widget2.PlaceWidget(self.wcs_extent[2])
-            
-            self.box_widget3 = vtkBoxWidget()
-            self.box_widget3.SetInteractor(self.widget)
-            self.box_widget3.SetProp3D(self.volume)
-            self.box_widget3.SetPlaceFactor(1.0)  # Make the box 1.25x larger than the actor
-            self.box_widget3.PlaceWidget(self.wcs_extent[3])
-
-            """            
-            representation = vtkBoxRepresentation()
-            representation.PlaceWidget(self.volume.GetBounds())
-            self.box_widget = vtkBoxWidget2()
-            self.box_widget.SetRepresentation(representation)
-            self.box_widget.SetInteractor(self.widget)
-            box_callback.actor = representation
-            self.box_widget.AddObserver('EndInteractionEvent', box_callback)
-            """
-            self.box_widget.On()
-            self.box_widget1.On()
-            self.box_widget2.On()
-            self.box_widget3.On()
-
-        else:
+        if not (os.path.exists(output_dir) and os.path.exists(input_dir)):
             print("Error, directories not exist")
+            return
 
+        os.environ['nnUNet_raw'] = '.'
+        os.environ['nnUNet_results'] = '.'
+        os.environ['nnUNet_preprocessed'] = '.'
+
+        nnunet_command = (
+            f"nnUNetv2_predict -i {input_dir}/ -o {output_dir}/ "
+            "-d Dataset111_453CT -tr nnUNetTrainer -p nnUNetPlans "
+            "-c 3d_fullres -f 0 -npp 1 -nps 1 -step_size 0.5 -device cuda --disable_tta"
+        )
+        start_time = time.time()
+        subprocess.run(nnunet_command, shell=True)
+        print("segmentation time:", time.time() - start_time)
+
+        outfile = os.path.join(output_dir, "Dental_0001.nii.gz")
+        img = nib.load(outfile)
+        npImage = img.get_fdata().transpose(2, 1, 0)
+        unique_labels = numpy.unique(npImage)
+
+        self.wcs_extent = []
+        xo, yo, zo = self.volume.GetOrigin()
+
+        for i in range(1, 6):
+            if i not in unique_labels:
+                self.wcs_extent.append([.0, .0, .0, .0, .0, .0])
+            else:
+                k1, k2, j1, j2, i1, i2 = calculate_3d_extent(npImage, i)
+                x1, x2 = i1 * self.spacing[0] + xo, i2 * self.spacing[0] + xo
+                y1, y2 = j1 * self.spacing[1] + yo, j2 * self.spacing[1] + yo
+                z1, z2 = k1 * self.spacing[2] + zo, k2 * self.spacing[2] + zo
+                self.wcs_extent.append([x1, x2, y1, y2, z1, z2])
+                print(self.wcs_extent[-1], self.volume.GetBounds())
+
+        self.box_widgets = []
+        for extent in self.wcs_extent[:4]:
+            bw = vtkBoxWidget()
+            bw.SetInteractor(self.widget)
+            bw.SetProp3D(self.volume)
+            bw.SetPlaceFactor(1.0)
+            bw.PlaceWidget(extent)
+            bw.On()
+            self.box_widgets.append(bw)
+
+    def _apply_bone_tf(self, colorFun, opacityFun, include_soft_tissue, width_s=80):
+        mn, mx = self.min_npV, self.max_npV
+        t0, t1, t2 = self.adjThresholds
+
+        colorFun.AddRGBPoint(mn, 0.3, 0.3, 1.0, 0.5, 0.0)
+        colorFun.AddRGBPoint(t0, 0.95, 0.95, 0.85, 0.5, 0.0)
+        colorFun.AddRGBPoint((t0 + t2) / 2, 0.75, 0.4, 0.35, 0.5, 0.0)
+        colorFun.AddRGBPoint(t2, 0.95, 0.84, 0.19, 0.5, 0.0)
+        colorFun.AddRGBPoint(mx, 0.78, 0.78, 0.92, 0.5, 0.0)
+
+        opacityFun.AddPoint(mn, 0, 0.5, 0.0)
+        if include_soft_tissue:
+            opacityFun.AddPoint(t0, 0.0, 0.5, 0.0)
+            opacityFun.AddPoint(t0 + width_s / 2.0, 0.5, 0.5, 0.0)
+            opacityFun.AddPoint(t0 + width_s, 0.0, 0.5, 0.0)
+        opacityFun.AddPoint(t1, 0, 0.5, 0.0)
+        opacityFun.AddPoint(t2, 0.5, 0.5, 0.0)
+        opacityFun.AddPoint(mx, 0.75, 0.5, 0.0)
+
+    def _apply_composite_shading(self, mapper, prop):
+        prop.ShadeOn()
+        mapper.SetBlendModeToComposite()
+        prop.SetAmbient(0.2)
+        prop.SetDiffuse(1.0)
+        prop.SetSpecular(0.0)
+        prop.SetSpecularPower(1.0)
+        prop.SetScalarOpacityUnitDistance(0.8919)
 
     @Slot()
     def renderMode(self):
         print("Rendering Mode")
-        opacityWindow = 2048 #(max_npV-min_npV)/4.0
-        opacityLevel = 1024 #(max_npV-min_npV)/2.0
-
         mapper = self.volume.GetMapper()
-        property = self.volume.GetProperty()
+        prop = self.volume.GetProperty()
         colorFun = vtk.vtkColorTransferFunction()
         opacityFun = vtk.vtkPiecewiseFunction()
-        gradientFun = vtk.vtkPiecewiseFunction()
 
-        if self.rendermode == 3: # Rendering 5 and change mode
-            colorFun.AddRGBPoint(self.min_npV, 0.3, 0.3, 1.0, 0.5, 0.0)
-            colorFun.AddRGBPoint(self.adjThresholds[0], 0.95, 0.95, 0.85, 0.5, 0.0)
-            colorFun.AddRGBPoint((self.adjThresholds[0]+self.adjThresholds[2])/2, 0.75, 0.4, 0.35, 0.5, 0.0)
-            colorFun.AddRGBPoint(self.adjThresholds[2], .95, .84, .19, .5, 0.0)
-            colorFun.AddRGBPoint(self.max_npV, 0.78, 0.78, 0.92, .5, 0.0)
-      
-            width_s=80
-            opacityFun.AddPoint(self.min_npV, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-            # Right
-            opacityFun.AddPoint(self.adjThresholds[1], 0, .5, .0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-            opacityFun.AddPoint(self.adjThresholds[2], 0.5, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-            opacityFun.AddPoint(self.max_npV, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-            
-            gradientFun.AddPoint(self.min_npV, 1.0, 0.5,.0)
-            gradientFun.AddPoint(self.min_npV + (self.max_npV-self.min_npV)*0.2,.0,0.5,.0)
-            #gradientFun.AddPoint(28.,.0,0.0,.0)
-            gradientFun.AddPoint(self.max_npV,1.0,0.5,.0)
-
-            property.ShadeOn()
-            mapper.SetBlendModeToComposite()
-            property.SetAmbient(0.2)
-            property.SetDiffuse(1.0)
-            property.SetSpecular(0.0)
-            property.SetSpecularPower(1.0)
-            property.SetScalarOpacityUnitDistance(0.8919)    
+        if self.rendermode == 3:       # currently Bone1 → switch to Bone2
+            self._apply_bone_tf(colorFun, opacityFun, include_soft_tissue=False)
+            self._apply_composite_shading(mapper, prop)
             self.rendermode = 5
-
-        elif self.rendermode == 5: # Rendering 1 and change mode
+        elif self.rendermode == 5:     # currently Bone2 → switch to MIP
+            opacityWindow, opacityLevel = 2048, 1024
             colorFun.AddRGBSegment(0.0, 1.0, 1.0, 1.0, 255.0, 1.0, 1.0, 1.0)
-            opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0, opacityLevel + 0.5 * opacityWindow, 1.0)
-            mapper.SetBlendModeToMaximumIntensity()            
+            opacityFun.AddSegment(opacityLevel - 0.5 * opacityWindow, 0.0,
+                                  opacityLevel + 0.5 * opacityWindow, 1.0)
+            mapper.SetBlendModeToMaximumIntensity()
             self.rendermode = 1
-
-        elif self.rendermode == 1: # Rendering 3 and change mode
-            width_s=80
-            width_l=160
-
-            colorFun.AddRGBPoint(self.min_npV, 0.3, 0.3, 1.0, 0.5, 0.0)
-            colorFun.AddRGBPoint(self.adjThresholds[0], 0.95, 0.95, 0.85, 0.5, 0.0)
-            colorFun.AddRGBPoint((self.adjThresholds[0]+self.adjThresholds[2])/2, 0.75, 0.4, 0.35, 0.5, 0.0)
-            colorFun.AddRGBPoint(self.adjThresholds[2], .95, .84, .19, .5, 0.0)
-            colorFun.AddRGBPoint(self.max_npV, 0.78, 0.78, 0.92, .5, 0.0)
-        
-            opacityFun.AddPoint(self.min_npV, 0, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-            # Right
-            opacityFun.AddPoint(self.adjThresholds[0], .0, .5, .0)
-            opacityFun.AddPoint(self.adjThresholds[0]+width_s/2.0, 0.5, .5, .0)
-            opacityFun.AddPoint(self.adjThresholds[0]+width_s, 0.0, .5, .0)
-            opacityFun.AddPoint(self.adjThresholds[1], 0, .5, .0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-            opacityFun.AddPoint(self.adjThresholds[2], 0.5, .5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-            opacityFun.AddPoint(self.max_npV, .75, 0.5, 0.0) # IntensityValue, Opacity, Position of midpoint, sharpness of midpoint
-            
-            gradientFun.AddPoint(self.min_npV, 1.0, 0.5,.0)
-            gradientFun.AddPoint(self.min_npV + (self.max_npV-self.min_npV)*0.2,.0,0.5,.0)
-            #gradientFun.AddPoint(28.,.0,0.0,.0)
-            gradientFun.AddPoint(self.max_npV,1.0,0.5,.0)
-
-            property.ShadeOn()
-            mapper.SetBlendModeToComposite()
-            property.SetAmbient(0.2)
-            property.SetDiffuse(1.0)
-            property.SetSpecular(0.0)
-            property.SetSpecularPower(1.0)
-            property.SetScalarOpacityUnitDistance(0.8919)             
+        elif self.rendermode == 1:     # currently MIP → switch to Bone1
+            self._apply_bone_tf(colorFun, opacityFun, include_soft_tissue=True)
+            self._apply_composite_shading(mapper, prop)
             self.rendermode = 3
 
-        
-        property.SetColor(colorFun)
-        property.SetScalarOpacity(opacityFun)
-        #property.SetGradientOpacity(gradientFun)
+        prop.SetColor(colorFun)
+        prop.SetScalarOpacity(opacityFun)
         self.widget.update()
 
     @Slot()
     def renderDirection(self):
-            
-        # 1st entering, setup camera   
         fp = numpy.array(self.ren.GetActiveCamera().GetFocalPoint())
-        p = numpy.array(self.ren.GetActiveCamera().GetPosition())
         dist = self.ren.GetActiveCamera().GetDistance()
-        if self.renderDir == 3: # Head to Anterior     
-            # from Anterior 
+
+        if self.renderDir == 3:        # Superior → Anterior
             self.ren.GetActiveCamera().SetPosition(fp[0], fp[1] - dist, fp[2])
-            self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
-            self.renderDir = 1 # Anterior
-        elif self.renderDir == 1:
-            # from Left
-            self.ren.GetActiveCamera().SetPosition(fp[0]+dist, fp[1], fp[2])
-            self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0);
-            self.renderDir = 2 # Left
-        elif self.renderDir == 2:
-            # from Head
-            self.ren.GetActiveCamera().SetPosition(fp[0], fp[1], fp[2]+dist)
-            self.ren.GetActiveCamera().SetViewUp(0.0, 1.0, 0.0);
-            self.renderDir = 3 # Head
+            self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0)
+            self.renderDir = 1
+        elif self.renderDir == 1:      # Anterior → Left
+            self.ren.GetActiveCamera().SetPosition(fp[0] + dist, fp[1], fp[2])
+            self.ren.GetActiveCamera().SetViewUp(0.0, 0.0, 1.0)
+            self.renderDir = 2
+        elif self.renderDir == 2:      # Left → Superior
+            self.ren.GetActiveCamera().SetPosition(fp[0], fp[1], fp[2] + dist)
+            self.ren.GetActiveCamera().SetViewUp(0.0, 1.0, 0.0)
+            self.renderDir = 3
 
         self.ren.GetActiveCamera().ParallelProjectionOn()
-        self.ren.GetActiveCamera().GetViewTransformMatrix()
-        #print(self.ren.GetActiveCamera().GetViewTransformMatrix())
         self.ren.ResetCameraClippingRange()
-        self.ren.ResetCamera()    
+        self.ren.ResetCamera()
         self.widget.update()
+
+    # Corner indices per view direction for bounding-box projection
+    _VIEW_CORNERS = {1: (0, 5), 2: (4, 7), 3: (1, 7)}
+
+    def _get_corner_display(self, extent):
+        coordinate = vtk.vtkCoordinate()
+        coordinate.SetCoordinateSystemToWorld()
+        coords = []
+        for vertex in Extent(*extent).vertices():
+            coordinate.SetValue(vertex)
+            coords.append(coordinate.GetComputedDisplayValue(self.ren))
+        return coords
+
+    def _crop_margins(self, disp_coords):
+        x, y = self.widget.GetRenderWindow().GetSize()
+        i_min, i_max = self._VIEW_CORNERS[self.renderDir]
+        x1, y1 = disp_coords[i_min]
+        x2, y2 = disp_coords[i_max]
+        dx = x1 if x1 < x - x2 else x - x2
+        dy = y1 if y1 < y - y2 else y - y2
+        return dx, dy
 
     @Slot()
     def captureScreen(self):
         print("Capture")
+        x, y = self.widget.GetRenderWindow().GetSize()
 
-        coordinate = vtk.vtkCoordinate()
-        coordinate.SetCoordinateSystemToWorld()
-        vb = self.volume.GetBounds()
-        extent = Extent(*vb)
-        dispCoord = []
-        for i, vertex in enumerate(extent.vertices()):
-            coordinate.SetValue(vertex)
-            dispCoord.append(coordinate.GetComputedDisplayValue(self.ren))
-            print(i, vertex, dispCoord[i])
+        vol_bounds = self.volume.GetBounds()
+        vol_coords = self._get_corner_display(vol_bounds)
+        for i, (vertex, coord) in enumerate(zip(Extent(*vol_bounds).vertices(), vol_coords)):
+            print(i, vertex, coord)
 
         winToImageFilter = vtk.vtkWindowToImageFilter()
         winToImageFilter.SetInput(self.widget.GetRenderWindow())
         winToImageFilter.SetInputBufferTypeToRGB()
         winToImageFilter.Update()
-        vtk_data = winToImageFilter.GetOutput()
+        imgArray = vtkmodules.util.numpy_support.vtk_to_numpy(
+            winToImageFilter.GetOutput().GetPointData().GetScalars()
+        ).reshape(x, y, 3)
 
-        imgArray = vtkmodules.util.numpy_support.vtk_to_numpy(vtk_data.GetPointData().GetScalars())
-        x,y = self.widget.GetRenderWindow().GetSize()
-        imgArray = imgArray.reshape(x, y, 3)
+        dx, dy = self._crop_margins(vol_coords)
+        croppedArray = numpy.flipud(imgArray[dy:y - dy + 1, dx:x - dx + 1, :])
 
-        # clip image
-        x,y = self.widget.GetRenderWindow().GetSize()
-        if (self.renderDir==1):   # Anterior to Posterior
-            x1 = dispCoord[0][0]
-            y1 = dispCoord[0][1]
-            x2 = dispCoord[5][0]
-            y2 = dispCoord[5][1]
-        elif (self.renderDir==2): # Left
-            x1 = dispCoord[4][0]
-            y1 = dispCoord[4][1]
-            x2 = dispCoord[7][0]
-            y2 = dispCoord[7][1]
-        elif (self.renderDir==3): # Head
-            x1 = dispCoord[1][0]
-            y1 = dispCoord[1][1]
-            x2 = dispCoord[7][0]
-            y2 = dispCoord[7][1]
-
-        if (x1<x-x2): dx= x1 
-        else: dx = x-x2
-        if (y1<y-y2): dy= y1 
-        else: dy = y-y2
-
-        croppedArray = imgArray[dy:y-dy+1, dx:x-dx+1, :]
-        croppedArray = numpy.flipud(croppedArray)
         scrFileName = "%s_%d%d%d.png" % (self.studyUID, self.rendermode, self.renderDir, self.screenshotCount)
         txtFileName = "%s_%d%d%d.txt" % (self.studyUID, self.rendermode, self.renderDir, self.screenshotCount)
-        print("Save to ",scrFileName)
+        print("Save to", scrFileName)
         self.screenshotCount += 1
 
-        xx= x-2*dx-1 #column
-        yy= y-2*dy-1 #row
+        xx = x - 2 * dx - 1
+        yy = y - 2 * dy - 1
 
-        if (self.wcs_extent):
+        if self.wcs_extent:
+            i_min, i_max = self._VIEW_CORNERS[self.renderDir]
+            with open(txtFileName, "w") as txtFile:
+                for j, seg_extent in enumerate(self.wcs_extent):
+                    dp = self._get_corner_display(seg_extent)
+                    xx1 = dp[i_min][0]
+                    yy1 = y - dp[i_min][1] - 1
+                    xx2 = dp[i_max][0]
+                    yy2 = y - dp[i_max][1] - 1
+                    cx = (xx1 + xx2 - 2 * dx) / (2 * xx)
+                    cy = (yy1 + yy2 - 2 * dy) / (2 * yy)
+                    width = (xx2 - xx1) / xx
+                    height = (yy1 - yy2) / yy
+                    print("Segment:", j, cx, cy, width, height)
+                    txtFile.write(f"{j} {cx} {cy} {width} {height}\n")
 
-            txtFile = open(txtFileName, "w")
-
-            for j,seg_extent in enumerate(self.wcs_extent):
-                sb = Extent(*seg_extent)
-                dpCoord = []
-                for i, vertex in enumerate(sb.vertices()):
-                    coordinate.SetValue(vertex)
-                    dpCoord.append(coordinate.GetComputedDisplayValue(self.ren))
-                
-                if (self.renderDir==1):   # Anterior to Posterior
-                    xx1 = dpCoord[0][0]
-                    yy1 = y-dpCoord[0][1]-1
-                    xx2 = dpCoord[5][0]
-                    yy2 = y-dpCoord[5][1]-1
-                elif (self.renderDir==2): # Left
-                    xx1 = dpCoord[4][0]
-                    yy1 = y-dpCoord[4][1]-1
-                    xx2 = dpCoord[7][0]
-                    yy2 = y-dpCoord[7][1]-1
-
-                elif (self.renderDir==3): # Head
-                    xx1 = dpCoord[1][0]
-                    yy1 = y-dpCoord[1][1]-1
-                    xx2 = dpCoord[7][0]
-                    yy2 = y-dpCoord[7][1]-1
-                del dpCoord           
-
-                print("Segment:",j)
-                cx, cy = (xx1+xx2-2*dx)/(2*xx), (yy1+yy2-2*dy)/(2*yy)
-                width, height = (xx2-xx1)/xx, (yy1-yy2)/yy
-                print(x, y, dx, dy, xx, yy, xx1, yy1, xx2, yy2)
-                print(xx1-dx, yy1-dy, xx2-dx, yy2-dy)
-                print((xx1-dx)/xx, (yy1-dy)/yy, (xx2-dx)/xx, (yy2-dy)/yy)
-                print(cx,cy,width,height)
-                txtFile.write(f"{j} {cx} {cy} {width} {height}\n")
-
-            txtFile.close()
-
-            
-        # wcs to disp, vol.bounds to crop, segmented bounds ratio(center(x,y), width, height), save to text file
-        
-        data = im.fromarray(croppedArray) 
-        data.save(scrFileName)
-        
-        """
-        fig, ax = plt.subplots()
-        # Display the array as an image
-        img = ax.imshow(croppedArray, cmap='viridis')
-        # Add a colorbar
-        plt.colorbar(img)
-        # Show the plot
-        plt.show()
-        """
+        im.fromarray(croppedArray).save(scrFileName)
 
     @Slot(str)
     def saveComment(self, commentText):
         print("saveComment")
-        if len(commentText) != 0:
-            # self.currentRow = objid in mongodb
-            # update comment 
-            self.collection.update_one( { "_id": ObjectId(self.currentRow['_id'])}, [ { "$set" : { "comment": commentText } }] )
-            self.my_TableModel.update_comment(self.rowNum,commentText)
-            Index = QModelIndex(self.rowNum)
-            self.my_TableModel.dataChanged.emit(Index, Index)
+        if commentText:
+            self.collection.update_one(
+                {"_id": ObjectId(self.currentRow['_id'])},
+                [{"$set": {"comment": commentText}}]
+            )
+            self.my_TableModel.update_comment(self.rowNum, commentText)
+            index = QModelIndex(self.rowNum)
+            self.my_TableModel.dataChanged.emit(index, index)
