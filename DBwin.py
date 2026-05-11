@@ -212,8 +212,9 @@ class MAINApp(QQuickView):
         try:
             client = pymongo.MongoClient(uri)
         # return a friendly error if a URI error is thrown 
-        except pymongo.errors.ConfigurationError:
-            print("An Invalid URI host error was received. Is your Atlas host name correct in your connection string?")
+        # except pymongo.errors.ConnectionFailure as e:
+        except pymongo.errors.ConfigurationError as e:
+            print(e,"An Invalid URI host error was received. Is your Atlas host name correct in your connection string?")
             sys.exit(1)
 
         # Send a ping to confirm a successful connection

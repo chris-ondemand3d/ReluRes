@@ -4,3 +4,4 @@ pyside6==6.7.2
 nibabel==5.2.1
 nnunetv2==2.5.1
 scikit-image==0.24.0
+scipy
