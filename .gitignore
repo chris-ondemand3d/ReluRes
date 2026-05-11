@@ -3,3 +3,4 @@ __pycache__/
 dicom2nifti\__pycache__/
 .vscode/
 *.png
+.env

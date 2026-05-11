@@ -36,8 +36,10 @@ if QVTK.PyQtImpl == 'PySide6':
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QMainWindow
 
-# Mongo Atlas URI
-uri = "mongodb+srv://kaster:spain123@testaiguide.imucr3f.mongodb.net/?retryWrites=true&w=majority&appName=testAIGuide"
+# Mongo Atlas URI — set MONGO_URI in environment or .env file
+uri = os.environ.get("MONGO_URI")
+if not uri:
+    raise RuntimeError("MONGO_URI environment variable is not set")
 
 class TableModel(QAbstractTableModel):
     selected = Signal(int)
