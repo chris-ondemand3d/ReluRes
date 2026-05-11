@@ -7,13 +7,28 @@ A desktop application for reviewing, visualizing, and annotating dental CT scan 
 ## Architecture Overview
 
 ```
-main.py          → QApplication entry point
+main.py          → QApplication entry point; loads .env into os.environ
 DBwin.py         → Main window (MAINApp), table model, 3D scene management
 ScanDirectory.py → DICOM loading (GDCM), NIfTI export, VTK volume construction
 dicom2nifti/     → DICOM-to-NIfTI conversion library (pydicom/nibabel based)
 dbwin.qml        → QML patient-list UI (TableView + control buttons)
 QVTKRenderWindowInteractor.py → Qt/VTK interactor bridge
+.env             → Local secrets (MONGO_URI); gitignored
 ```
+
+### DBwin.py — key internals
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `_STL_MODELS` | module dict | Maps button name → `(mongo_field, btn_idx, opacity)` for all 8 STL structures |
+| `_cleanup_scene()` | method | Removes volume, box widgets, and all STL actors when a new row is selected |
+| `_setup_camera()` | method | Sets anterior view + parallel projection; called once after first model loads |
+| `_toggle_stl()` | method | Generic STL load/unload driven by `_STL_MODELS`; replaces 8 copy-paste blocks |
+| `_apply_bone_tf()` | method | Shared CT Bone1/Bone2 transfer function; `include_soft_tissue` flag controls peak |
+| `_apply_composite_shading()` | method | Sets shade, blend mode, and material for composite render |
+| `_VIEW_CORNERS` | class dict | Maps render direction → `(min_vertex_idx, max_vertex_idx)` for bbox projection |
+| `_get_corner_display()` | method | Projects world-space extent corners to display coordinates |
+| `_crop_margins()` | method | Computes symmetric crop margins from projected volume corners |
 
 ---
 
@@ -187,19 +202,19 @@ All values are normalized to `[0, 1]` relative to the cropped image dimensions.
 
 ## 3D Models (STL)
 
-Loaded with `vtkSTLReader` (merging on). Each structure is toggled independently:
+Loaded with `vtkSTLReader` (merging on). All 8 named structures are driven by the module-level `_STL_MODELS` registry — each entry maps a button name to its MongoDB path field, `buttonStatus` index, and opacity. Toggle calls `_toggle_stl()` generically; no per-model code paths exist.
 
-| Button | Opacity | Structure |
-|---|---|---|
-| Mandible | 0.3 | Lower jaw bone |
-| Maxillary | 0.3 | Upper jaw bone |
-| Upper | 0.3 | Upper dentition |
-| Lower | 0.3 | Lower dentition |
-| Left Sinus | 1.0 | Left maxillary sinus |
-| Right Sinus | 1.0 | Right maxillary sinus |
-| Left Nerve | 1.0 | Left inferior alveolar nerve |
-| Right Nerve | 1.0 | Right inferior alveolar nerve |
-| Tooth buttons (×32) | — | Individual tooth models |
+| Button name | `buttonStatus` index | Opacity | Structure |
+|---|---|---|---|
+| `Mandible` | 1 | 0.3 | Lower jaw bone |
+| `Maxiilary` | 2 | 0.3 | Upper jaw bone |
+| `Upper` | 3 | 0.3 | Upper dentition |
+| `Left Sinus` | 4 | 1.0 | Left maxillary sinus |
+| `Right Sinus` | 5 | 1.0 | Right maxillary sinus |
+| `Lower` | 6 | 0.3 | Lower dentition |
+| `Left Nerve` | 7 | 1.0 | Left inferior alveolar nerve |
+| `Right Nerve` | 8 | 1.0 | Right inferior alveolar nerve |
+| Tooth buttons (×32) | 9–40 | — | Individual tooth models |
 
 Button state: `0` = not available, `1` = available/hidden, `2` = visible.
 
@@ -222,6 +237,18 @@ Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
+
+---
+
+## Configuration
+
+Create a `.env` file in the project root (gitignored):
+
+```
+MONGO_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority&appName=<app>
+```
+
+`main.py` loads this file into `os.environ` before importing `DBwin`. The variable is required — the app exits with an error if it is unset.
 
 ---
 
